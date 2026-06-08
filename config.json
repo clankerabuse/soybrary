@@ -1,0 +1,10 @@
+{
+  "concurrency": 3,
+  "delay_ms": 2000,
+  "data_dir": "./data",
+  "headful_session": true,
+  "validate_images": true,
+  "sanitize_images": false,
+  "validate_videos": true,
+  "sanitize_videos": false
+}

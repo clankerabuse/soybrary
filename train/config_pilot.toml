@@ -13,7 +13,8 @@
 
 # --- base model ---
 pretrained_model_name_or_path = "/home/ubuntu/models/sd_xl_base_1.0_fixvae_fp16.safetensors"
-vae = ""
+# VAE is baked into the fixed checkpoint. Do not set `vae = ""`; sd-scripts
+# treats an empty string as a model id/path and crashes.
 
 # --- output ---
 output_dir = "/home/ubuntu/out"

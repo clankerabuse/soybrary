@@ -23,9 +23,34 @@ cd "$WORKDIR"
 # --- System packages --------------------------------------------------------
 # OpenCV imports cv2 even for headless training; libGL.so.1 is not present on
 # some minimal Lambda/Ubuntu images unless libgl1 is installed.
+# python3.10-dev + build-essential are REQUIRED: once CUDA is active, Triton
+# JIT-compiles a cuda_utils helper and needs Python.h + gcc, otherwise the
+# training launch dies with "fatal error: Python.h: No such file or directory".
 echo "==> Installing system runtime packages"
 sudo apt-get update -y
-sudo apt-get install -y python3.10 python3.10-venv python3.10-dev libgl1 libglib2.0-0
+sudo apt-get install -y python3.10 python3.10-venv python3.10-dev build-essential \
+    libgl1 libglib2.0-0
+
+# --- NVIDIA driver ----------------------------------------------------------
+# Lambda Stack images normally ship the driver, but some hosts come up WITHOUT
+# it (no /dev/nvidia*, no nvidia-smi, no kernel module). In that state accelerate
+# silently falls back to CPU and "training" runs ~100x slower with no error.
+# This block installs a CUDA 12.4-capable driver (>=550) if one is missing.
+echo "==> Checking NVIDIA driver"
+if ! command -v nvidia-smi >/dev/null 2>&1 || ! nvidia-smi >/dev/null 2>&1; then
+  if lspci 2>/dev/null | grep -iq nvidia; then
+    echo "==> NVIDIA GPU present but driver not loaded — installing nvidia-driver-550-server"
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver-550-server
+    sudo modprobe nvidia || true
+    sudo modprobe nvidia_uvm || true
+    nvidia-smi || { echo "ERROR: driver installed but nvidia-smi still fails — a reboot may be required" >&2; exit 1; }
+  else
+    echo "ERROR: no NVIDIA GPU found on the PCI bus (lspci). This instance has no GPU." >&2
+    exit 1
+  fi
+fi
+echo "==> nvidia-smi OK:"
+nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
 
 # --- Python 3.10 venv -------------------------------------------------------
 if ! command -v python3.10 >/dev/null 2>&1; then
@@ -80,6 +105,19 @@ tpu_use_cluster: false
 tpu_use_sudo: false
 use_cpu: false
 YAML
+
+# --- Fail-fast CUDA assertion -----------------------------------------------
+# The single most expensive failure mode is a silent CPU fallback (a missing
+# driver cost a full ~9.5h pilot run once). Refuse to declare success unless
+# torch can actually see the GPU.
+echo "==> Verifying torch can see the GPU"
+python - <<'PY'
+import sys, torch
+if not torch.cuda.is_available():
+    sys.exit("FATAL: torch.cuda.is_available() is False — training would run on CPU. "
+             "Check the NVIDIA driver (nvidia-smi) before proceeding.")
+print(f"CUDA OK: {torch.cuda.get_device_name(0)} (torch {torch.__version__})")
+PY
 
 cat <<EOF
 

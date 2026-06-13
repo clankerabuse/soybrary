@@ -73,6 +73,17 @@ fi
 [ -f "$CONFIG" ] || { echo "ERROR: train config not found: $CONFIG" >&2; exit 1; }
 [ -d "$TRAIN_DATA" ] || { echo "ERROR: TRAIN_DATA not found: $TRAIN_DATA — run pull_data.sh first" >&2; exit 1; }
 
+# --- Fail-fast: never silently train on CPU --------------------------------
+# accelerate will quietly fall back to CPU if the NVIDIA driver is missing,
+# turning a ~1-2h run into days. Abort loudly instead.
+python - <<'PY'
+import sys, torch
+if not torch.cuda.is_available():
+    sys.exit("FATAL: torch.cuda.is_available() is False — refusing to launch on CPU. "
+             "Run nvidia-smi; if it fails, (re)install the driver (see setup_lambda.sh).")
+print(f"CUDA OK: {torch.cuda.get_device_name(0)}")
+PY
+
 cd "$SDSCRIPTS_DIR"
 echo "==> Launching SDXL LoRA training (MODE=$MODE)"
 echo "    train config:    $CONFIG"

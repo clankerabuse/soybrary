@@ -87,8 +87,17 @@ All train/ scripts accept `MODE=pilot` (default) or `MODE=full`:
 - Branch: `test/sdxl-lora-pipeline` (3 commits ahead of main)
 - Pilot is **actively training** on a Lambda Labs A100 instance at `<instance-ip>`
 - SSH key: `~/.ssh/lambda-training.pem`
-- As of last check: still in **latent caching phase** (`46/9994`), estimated ~7-8 hrs for caching, then ~1-2 hrs training
-- tmux session name: `training`
+- tmux session name: `training`. Live log: `~/train_pilot.log`
+- **IMPORTANT — GPU driver was missing on this host.** The instance came up with NO
+  NVIDIA driver (no `nvidia-smi`, no kernel module), so the first launch silently
+  ran on **CPU** (`accelerator device: cpu`, ~9.55s/it, ETA kept growing). Fixed by:
+  `sudo apt-get install -y nvidia-driver-550-server` (resolved to 580.159.03) +
+  `sudo modprobe nvidia nvidia_uvm`, then `python3.10-dev` + `build-essential`
+  (Triton needs `Python.h` to JIT its cuda_utils once CUDA is active). Now confirmed
+  `accelerator device: cuda` on the A100-SXM4-40GB. The CPU run's on-disk `.npz`
+  latents are reused (VAE encode is device-independent), so caching resumed mid-way.
+- `setup_lambda.sh` + `train_lora.sh` now fail-fast if `torch.cuda.is_available()`
+  is False, so a silent CPU fallback can never burn hours again.
 - To reconnect and check progress:
   ```bash
   ssh -i ~/.ssh/lambda-training.pem ubuntu@<instance-ip>
@@ -157,3 +166,5 @@ MODE=pilot bash train/push_model.sh
 4. **sd-scripts v0.11.0** released same day (June 12 2026) — major refactor, untested. Pinned to v0.10.6.
 5. **DB `extension` column unreliable** (says `jpg` for `.png` files). Always trust filesystem extension, not DB.
 6. **kohya `metadata_file`** style is incompatible with raw scraper JSON format. Use DreamBooth style (`.txt` sidecars) only.
+7. **Silent CPU fallback** — a Lambda host can boot WITHOUT the NVIDIA driver. accelerate then prints `accelerator device: cpu` and trains ~100x slower with no hard error. Diagnose with `nvidia-smi` / `python -c "import torch; print(torch.cuda.is_available())"`. Fix: `sudo apt-get install -y nvidia-driver-550-server && sudo modprobe nvidia nvidia_uvm`. `setup_lambda.sh` now installs the driver if missing and both scripts assert CUDA before proceeding.
+8. **`Python.h` missing / Triton compile fail** — once CUDA is active, Triton JIT-compiles `cuda_utils` and needs `python3.10-dev` + `build-essential`. Without them the launch dies with `fatal error: Python.h: No such file or directory`. Now installed by `setup_lambda.sh`.

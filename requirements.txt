@@ -2,3 +2,9 @@ playwright>=1.40.0
 Pillow>=10.0.0
 fastapi>=0.100.0
 uvicorn[standard]>=0.23.0
+
+# Dataset packaging + Cloudflare R2 sync (build_dataset.py / package_dataset.py / r2_sync.py).
+# boto3/botocore pinned <1.36 to avoid the CRC32 checksum trailer that R2 rejects.
+boto3>=1.34.0,<1.36.0
+botocore>=1.34.0,<1.36.0
+python-dotenv>=1.0.0

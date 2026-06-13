@@ -1,0 +1,49 @@
+# ============================================================================
+# Pinned environment for SDXL LoRA training of the Soybrary dataset.
+#
+# These versions are deliberately pinned. Mismatched torch/CUDA/python and an
+# unstable sd-scripts checkout are the most common causes of broken setups.
+#
+# TARGET ENVIRONMENT
+#   Python:      3.10.x        (sd-scripts is tested on 3.10; 3.11/3.12 untested)
+#   GPU:         NVIDIA A100 80GB (Lambda Labs gpu_1x_a100 / gpu_1x_a100_sxm4)
+#   CUDA:        12.4
+#   sd-scripts:  git tag v0.10.6  (stable release BEFORE the v0.11.0 refactor)
+#
+# PyTorch is NOT installed via this file. Install it first with the correct
+# CUDA wheel index, then `pip install -r requirements-lock.txt`:
+#
+#   pip install torch==2.6.0 torchvision==0.21.0 \
+#       --index-url https://download.pytorch.org/whl/cu124
+#
+# Then clone + install sd-scripts at the pinned tag:
+#
+#   git clone https://github.com/kohya-ss/sd-scripts.git
+#   cd sd-scripts && git checkout v0.10.6
+#   pip install --use-pep517 -r requirements.txt
+#
+# `accelerate config` answers for a single A100:
+#   - This machine
+#   - No distributed training
+#   - NO  (run on CPU only?)
+#   - NO  (torch dynamo?)
+#   - NO  (DeepSpeed?)
+#   - all (GPU ids)
+#   - bf16  (A100 supports bf16; preferred over fp16)
+# ============================================================================
+
+# --- R2 / S3 client (dataset + model transfer) ---
+# botocore default checksum behavior changed in late-2025 SDKs and can send
+# CRC32 checksums that Cloudflare R2 rejects. We pin to a known-good range and
+# additionally set request_checksum_calculation="when_required" in r2_sync.py.
+boto3>=1.34.0,<1.36.0
+botocore>=1.34.0,<1.36.0
+
+# --- config / secrets ---
+python-dotenv>=1.0.0
+
+# --- model upload (optional HF path; R2 is the default) ---
+huggingface_hub>=0.23.0
+
+# --- image handling (manifest building / packaging) ---
+Pillow>=10.0.0

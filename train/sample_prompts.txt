@@ -1,0 +1,8 @@
+# Sample prompts generated during training to sanity-check that distinct
+# variants render distinctly (no fixed trigger word; the variant name is the trigger).
+# Format: prompt followed by kohya CLI-style flags.
+chudjak, open_mouth, glasses, white_background --w 1024 --h 1024 --d 42 --s 28 --l 7
+cobson, smug, soyjak --w 1024 --h 1024 --d 42 --s 28 --l 7
+gapejak, wholesome_soyjak, stubble, white_background --w 1024 --h 1024 --d 42 --s 28 --l 7
+feraljak, screaming --w 1024 --h 1024 --d 42 --s 28 --l 7
+markiplier_soyjak, pointing --w 1024 --h 1024 --d 42 --s 28 --l 7

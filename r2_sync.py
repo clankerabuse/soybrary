@@ -162,6 +162,57 @@ def cmd_download(args):
     print(f"Downloaded {count} files into {dest}")
 
 
+def cmd_download_file(args):
+    """Download a single R2 object to a local path."""
+    client = make_client()
+    bucket = get_env("R2_BUCKET_NAME")
+    dest = Path(args.dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    print(f"  <- {args.key} -> {dest}")
+    client.download_file(bucket, args.key, str(dest), Config=TRANSFER_CONFIG)
+
+
+def cmd_download_manifest(args):
+    """Download only the images (and optionally metadata) listed in a JSONL manifest."""
+    import json as _json
+
+    client = make_client()
+    bucket = get_env("R2_BUCKET_NAME")
+    manifest_path = Path(args.manifest)
+    if not manifest_path.exists():
+        sys.exit(f"ERROR: manifest not found: {manifest_path}")
+
+    records = [_json.loads(l) for l in manifest_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    print(f"Manifest: {len(records)} records")
+
+    img_dir = Path(args.image_dir)
+    img_dir.mkdir(parents=True, exist_ok=True)
+
+    meta_dir = Path(args.metadata_dir) if args.metadata_dir else None
+    if meta_dir:
+        meta_dir.mkdir(parents=True, exist_ok=True)
+
+    skipped = 0
+    for i, rec in enumerate(records):
+        if i and i % 1000 == 0:
+            print(f"  {i}/{len(records)}...", flush=True)
+
+        img_dest = img_dir / rec["file"]
+        if not img_dest.exists():
+            client.download_file(bucket, f"images/{rec['file']}", str(img_dest),
+                                 Config=TRANSFER_CONFIG)
+        else:
+            skipped += 1
+
+        if meta_dir:
+            meta_dest = meta_dir / f"{rec['id']}.json"
+            if not meta_dest.exists():
+                client.download_file(bucket, f"metadata/{rec['id']}.json", str(meta_dest),
+                                     Config=TRANSFER_CONFIG)
+
+    print(f"Done: {len(records)} images in {img_dir} ({skipped} already existed, skipped)")
+
+
 def cmd_list(args):
     client = make_client()
     bucket = get_env("R2_BUCKET_NAME")
@@ -195,6 +246,19 @@ def main():
     p.add_argument("--prefix", default="datasets/soyjak-sdxl")
     p.add_argument("--dest", default="./pkg")
     p.set_defaults(func=cmd_download)
+
+    p = sub.add_parser("download-file", help="Download a single R2 object to a local path.")
+    p.add_argument("--key", required=True, help="R2 object key.")
+    p.add_argument("--dest", required=True, help="Local destination path.")
+    p.set_defaults(func=cmd_download_file)
+
+    p = sub.add_parser("download-manifest",
+                       help="Download images (+metadata) listed in a JSONL manifest.")
+    p.add_argument("--manifest", required=True, help="Path to local JSONL manifest file.")
+    p.add_argument("--image-dir", required=True, help="Local dir to write images into.")
+    p.add_argument("--metadata-dir", default=None,
+                   help="Local dir to write metadata JSONs into (optional).")
+    p.set_defaults(func=cmd_download_manifest)
 
     p = sub.add_parser("list", help="List objects under a prefix.")
     p.add_argument("--prefix", default="datasets/soyjak-sdxl")

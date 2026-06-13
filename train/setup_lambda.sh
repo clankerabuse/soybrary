@@ -20,11 +20,17 @@ SDSCRIPTS_DIR="$WORKDIR/sd-scripts"
 echo "==> Working dir: $WORKDIR"
 cd "$WORKDIR"
 
+# --- System packages --------------------------------------------------------
+# OpenCV imports cv2 even for headless training; libGL.so.1 is not present on
+# some minimal Lambda/Ubuntu images unless libgl1 is installed.
+echo "==> Installing system runtime packages"
+sudo apt-get update -y
+sudo apt-get install -y python3.10 python3.10-venv python3.10-dev libgl1 libglib2.0-0
+
 # --- Python 3.10 venv -------------------------------------------------------
 if ! command -v python3.10 >/dev/null 2>&1; then
-  echo "==> Installing python3.10"
-  sudo apt-get update -y
-  sudo apt-get install -y python3.10 python3.10-venv python3.10-dev
+  echo "ERROR: python3.10 was not installed successfully" >&2
+  exit 1
 fi
 
 echo "==> Creating venv at $VENV"

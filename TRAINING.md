@@ -82,41 +82,60 @@ All train/ scripts accept `MODE=pilot` (default) or `MODE=full`:
 | Expected time (A100) | ~9-10 hrs total | ~15-20 hrs total |
 | Expected time (2×H100) | ~2-3 hrs total | ~3-4 hrs total |
 
-## Current state (as of this session)
+## Current state (as of session 2 completion)
 
-- Branch: `test/sdxl-lora-pipeline` (3 commits ahead of main)
-- Pilot is **actively training** on a Lambda Labs A100 instance at `<instance-ip>`
-- SSH key: `~/.ssh/lambda-training.pem`
-- tmux session name: `training`. Live log: `~/train_pilot.log`
-- **IMPORTANT — GPU driver was missing on this host.** The instance came up with NO
-  NVIDIA driver (no `nvidia-smi`, no kernel module), so the first launch silently
-  ran on **CPU** (`accelerator device: cpu`, ~9.55s/it, ETA kept growing). Fixed by:
-  `sudo apt-get install -y nvidia-driver-550-server` (resolved to 580.159.03) +
-  `sudo modprobe nvidia nvidia_uvm`, then `python3.10-dev` + `build-essential`
-  (Triton needs `Python.h` to JIT its cuda_utils once CUDA is active). Now confirmed
-  `accelerator device: cuda` on the A100-SXM4-40GB. The CPU run's on-disk `.npz`
-  latents are reused (VAE encode is device-independent), so caching resumed mid-way.
-- `setup_lambda.sh` + `train_lora.sh` now fail-fast if `torch.cuda.is_available()`
-  is False, so a silent CPU fallback can never burn hours again.
-- To reconnect and check progress:
-  ```bash
-  ssh -i ~/.ssh/lambda-training.pem ubuntu@<instance-ip>
-  tmux attach -t training
-  ```
+**Pilot run COMPLETE.** Started June 13 2026 ~14:24 UTC, finished ~17:20 UTC (~3 hours total).
 
-## When training finishes (TODO)
+- Branch: `test/sdxl-lora-pipeline` (4 commits ahead of main, including GPU hardening fixes)
+- Instance: Lambda Labs A100-SXM4-40GB at `<instance-ip>` (now terminated after `push_model.sh`)
+- SSH key: `~/.ssh/lambda-training.pem` (instance no longer running)
 
+**Pilot training summary:**
+- Dataset: 9,994 images (10K pilot stratified subset), 2,576 batches/epoch, 3 epochs → 7,500 steps
+- **Latent caching:** ~25 min (GPU-bound at ~2.8 it/s after resuming from CPU-cached state)
+- **Training steps:** ~2.9 hrs (~1.42 s/it average, A100 at full capacity)
+- **Sample checkpoints:** generated at steps 1500, 3000, 4500, 6000, 7500
+  - Samples available locally: `~/Downloads/soyjak-samples/sample/soyjak-lora-sdxl-pilot_*.png`
+  - Samples show distinct variant rendering (chudjak, cobson, gapejak, etc. visually separating)
+
+**LoRA checkpoints on R2** (`soyjak-training` bucket):
+- `models/soyjak-lora-sdxl-pilot-step00001500.safetensors` (229 MB)
+- `models/soyjak-lora-sdxl-pilot-step00003000.safetensors` (229 MB)
+- `models/soyjak-lora-sdxl-pilot-step00004500.safetensors` (229 MB)
+- `models/soyjak-lora-sdxl-pilot-step00006000.safetensors` (229 MB)
+- `models/soyjak-lora-sdxl-pilot-step00007500.safetensors` (229 MB) — **use this for generation**
+- `models/soyjak-lora-sdxl-pilot.safetensors` (229 MB) — symlink to final (step 7500)
+
+All pushed to R2 at 2026-06-13 12:15:59–12:16:20 CDT (note: step timestamps differ from wall clock due to when checkpoint logic triggered).
+
+### Hardening fixes applied (commit 9312a4e)
+
+The first launch silently ran on CPU for ~9.5 hours due to a missing NVIDIA driver. Fixed:
+
+- `setup_lambda.sh` now:
+  - Installs `nvidia-driver-550-server` if GPU is present but driver is missing
+  - Installs `python3.10-dev` + `build-essential` (required for Triton CUDA JIT)
+  - Asserts `torch.cuda.is_available()` at end; fails if False
+- `train_lora.sh` now asserts CUDA before launch (prevents silent CPU fallback)
+- Both scripts will now error loudly instead of silently training on CPU
+
+## Next steps / for next session
+
+**To test the pilot LoRA locally:**
 ```bash
-# On Lambda instance:
-MODE=pilot bash train/push_model.sh     # push LoRA to R2 BEFORE terminating
+# Download final model from R2:
+.venv/bin/python r2_sync.py download --prefix models/soyjak-lora-sdxl-pilot/step00007500 --dest ./pilot_lora
 
-# Then terminate the instance in Lambda console.
-
-# Locally, download the LoRA to test:
-.venv/bin/python r2_sync.py download --prefix models/soyjak-lora-sdxl-pilot --dest ./pilot_lora
+# Use in ComfyUI / A1111 with prompts like:
+# - "chudjak, open_mouth, glasses"
+# - "cobson, smug"
+# - "gapejak, wholesome_soyjak, stubble"
 ```
 
-Test in ComfyUI / A1111 with prompts like `chudjak, open_mouth, glasses` or `cobson, smug`.
+**Decision tree:**
+- **If pilot quality is good** → run full dataset: `MODE=full` on 2× H100 SXM (~$6.58/hr, ~3-4 hrs, ~30K steps)
+- **If pilot quality is bad** → check sample images (`~/Downloads/soyjak-samples/sample/`), tweak learning rate or steps in `config_pilot.toml`, re-run pilot
+- **For faster iteration** → use 2× or 4× H100 (reduces ~9 hrs caching+training to ~2-3 hrs)
 
 ## Next steps after pilot
 

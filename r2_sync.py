@@ -5,9 +5,11 @@ r2_sync.py - Phase 3 of the Soybrary -> SDXL LoRA pipeline.
 Upload/download files to/from Cloudflare R2 via the S3-compatible API.
 
 Used twice in the workflow:
-  1. Locally: upload the packaged dataset (shards + dataset.toml + manifest)
-     to R2 under datasets/soyjak-sdxl/.
-  2. On Lambda: download that prefix back, and later upload the trained LoRA.
+  1. Locally: upload the packaged dataset (shards + shard_manifest) to R2
+     under datasets/soyjak-sdxl-<mode>/ (package_dataset.py does this, but
+     you can also call this script directly).
+  2. On Lambda: download-archive pulls all shards for a given mode and
+     extracts them into a flat training directory in one shot.
 
 R2 / boto3 notes baked in here:
   - endpoint_url = R2_ENDPOINT, region_name = "auto" (required by the SDK,
@@ -24,28 +26,37 @@ R2 / boto3 notes baked in here:
     The env vars AWS_REQUEST_CHECKSUM_CALCULATION / AWS_RESPONSE_CHECKSUM_VALIDATION
     also work as a global fallback on >=1.36.
   - Multipart transfers via TransferConfig for large shards (R2 single-PUT cap
-    is 5 GB; our shards are ~2 GB but multipart is safe and resumable-friendly).
+    is 5 GB; our shards are ~4 GB but multipart is safe and resumable-friendly).
 
 Credentials are read from .env (see .env.example):
   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, R2_ENDPOINT
 
 Usage:
   # Upload the whole package dir to a prefix
-  python r2_sync.py upload --src data/package --prefix datasets/soyjak-sdxl
+  python r2_sync.py upload --src data/package/full --prefix datasets/soyjak-sdxl-full
+
+  # Download all shards for a mode and extract into a flat dir (use on Lambda)
+  python r2_sync.py download-archive --mode full --dest /home/ubuntu/train_data
+  python r2_sync.py download-archive --mode pilot --dest /home/ubuntu/train_data_pilot
 
   # Download a prefix into a local dir
-  python r2_sync.py download --prefix datasets/soyjak-sdxl --dest ./pkg
+  python r2_sync.py download --prefix datasets/soyjak-sdxl-full --dest ./pkg
 
   # Upload a single file (e.g. trained LoRA)
   python r2_sync.py upload-file --src out/soyjak.safetensors --key models/soyjak-lora-sdxl/soyjak.safetensors
 
   # List a prefix
-  python r2_sync.py list --prefix datasets/soyjak-sdxl
+  python r2_sync.py list --prefix datasets/soyjak-sdxl-full
 """
 
 import argparse
+import hashlib
+import json
 import os
 import sys
+import tarfile
+import tempfile
+import time
 from pathlib import Path
 
 try:
@@ -175,6 +186,7 @@ def cmd_download_file(args):
 def cmd_download_manifest(args):
     """Download only the images (and optionally metadata) listed in a JSONL manifest."""
     import json as _json
+    import time
 
     client = make_client()
     bucket = get_env("R2_BUCKET_NAME")
@@ -183,7 +195,8 @@ def cmd_download_manifest(args):
         sys.exit(f"ERROR: manifest not found: {manifest_path}")
 
     records = [_json.loads(l) for l in manifest_path.read_text(encoding="utf-8").splitlines() if l.strip()]
-    print(f"Manifest: {len(records)} records")
+    total = len(records)
+    print(f"Manifest: {total} records")
 
     img_dir = Path(args.image_dir)
     img_dir.mkdir(parents=True, exist_ok=True)
@@ -192,15 +205,18 @@ def cmd_download_manifest(args):
     if meta_dir:
         meta_dir.mkdir(parents=True, exist_ok=True)
 
+    PRINT_EVERY = 500
     skipped = 0
-    for i, rec in enumerate(records):
-        if i and i % 1000 == 0:
-            print(f"  {i}/{len(records)}...", flush=True)
+    downloaded = 0
+    t_start = time.monotonic()
+    t_last = t_start
 
+    for i, rec in enumerate(records):
         img_dest = img_dir / rec["file"]
         if not img_dest.exists():
             client.download_file(bucket, f"images/{rec['file']}", str(img_dest),
                                  Config=TRANSFER_CONFIG)
+            downloaded += 1
         else:
             skipped += 1
 
@@ -210,7 +226,131 @@ def cmd_download_manifest(args):
                 client.download_file(bucket, f"metadata/{rec['id']}.json", str(meta_dest),
                                      Config=TRANSFER_CONFIG)
 
-    print(f"Done: {len(records)} images in {img_dir} ({skipped} already existed, skipped)")
+        if (i + 1) % PRINT_EVERY == 0 or (i + 1) == total:
+            now = time.monotonic()
+            elapsed = now - t_start
+            rate = (i + 1) / elapsed if elapsed > 0 else 0
+            remaining = (total - (i + 1)) / rate if rate > 0 else 0
+            chunk_rate = PRINT_EVERY / (now - t_last) if (now - t_last) > 0 else 0
+            t_last = now
+            pct = (i + 1) / total * 100
+            eta_min = remaining / 60
+            print(
+                f"  [{i+1:>6}/{total}] {pct:5.1f}%  "
+                f"downloaded={downloaded}  skipped={skipped}  "
+                f"rate={chunk_rate:.0f}/s  elapsed={elapsed/60:.1f}m  eta={eta_min:.1f}m",
+                flush=True,
+            )
+
+    elapsed_total = time.monotonic() - t_start
+    print(f"Done: {total} records in {img_dir} "
+          f"({downloaded} downloaded, {skipped} skipped) "
+          f"in {elapsed_total/60:.1f}m")
+
+
+def _sha256(path, chunk=1024 * 1024):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def cmd_download_archive(args):
+    """Download all shards for a mode from R2 and extract into a flat directory.
+
+    This replaces the old download-manifest + gen_captions workflow.
+    Each shard is a flat tar containing {id}.{ext} images and {id}.txt captions
+    baked in by package_dataset.py.
+
+    The shards are streamed: downloaded to a temp file, verified (sha256),
+    extracted in place, then the temp file is deleted — so peak extra disk
+    usage is only one shard at a time rather than all shards at once.
+    """
+    client = make_client()
+    bucket = get_env("R2_BUCKET_NAME")
+
+    mode = args.mode
+    r2_prefix = args.r2_prefix or f"datasets/soyjak-sdxl-{mode}"
+    r2_prefix = r2_prefix.strip("/")
+    dest = Path(args.dest)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    # --- 1. Fetch shard_manifest.json ---------------------------------------
+    manifest_key = f"{r2_prefix}/shard_manifest.json"
+    print(f"Fetching shard manifest: r2://{bucket}/{manifest_key}")
+    resp = client.get_object(Bucket=bucket, Key=manifest_key)
+    shard_manifest = json.loads(resp["Body"].read())
+    shards = shard_manifest["shards"]
+    total_bytes = shard_manifest["total_bytes"]
+    print(
+        f"  {len(shards)} shard(s)  |  "
+        f"{shard_manifest['total_images']} images  |  "
+        f"{total_bytes / 1e9:.2f} GB total"
+    )
+
+    # --- 2. Download + extract each shard -----------------------------------
+    t_start = time.monotonic()
+    extracted_total = 0
+
+    for idx, shard in enumerate(shards):
+        shard_key = f"{r2_prefix}/shards/{shard['name']}"
+        size_mb = shard["bytes"] / 1e6
+        print(
+            f"\n[{idx+1}/{len(shards)}] {shard['name']}  "
+            f"({size_mb:.0f} MB, {shard['images']} images)",
+            flush=True,
+        )
+
+        # Download to a temp file in dest so it's on the same filesystem.
+        with tempfile.NamedTemporaryFile(dir=dest, suffix=".tar", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+
+        try:
+            print(f"  downloading...", flush=True)
+            t_dl = time.monotonic()
+            client.download_file(bucket, shard_key, str(tmp_path), Config=TRANSFER_CONFIG)
+            dl_elapsed = time.monotonic() - t_dl
+            actual_size = tmp_path.stat().st_size
+            speed = actual_size / dl_elapsed / 1e6 if dl_elapsed > 0 else 0
+            print(f"  downloaded in {dl_elapsed:.1f}s  ({speed:.0f} MB/s)", flush=True)
+
+            # Verify checksum
+            if shard.get("sha256"):
+                print(f"  verifying sha256...", flush=True)
+                digest = _sha256(tmp_path)
+                if digest != shard["sha256"]:
+                    sys.exit(
+                        f"ERROR: sha256 mismatch for {shard['name']}\n"
+                        f"  expected: {shard['sha256']}\n"
+                        f"  got:      {digest}"
+                    )
+                print(f"  checksum OK", flush=True)
+
+            # Extract flat into dest
+            print(f"  extracting into {dest}...", flush=True)
+            t_ex = time.monotonic()
+            with tarfile.open(tmp_path, "r") as tf:
+                tf.extractall(path=dest)
+            ex_elapsed = time.monotonic() - t_ex
+            extracted_total += shard["images"]
+            print(
+                f"  extracted {shard['images']} files in {ex_elapsed:.1f}s  "
+                f"({extracted_total} total so far)",
+                flush=True,
+            )
+
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    elapsed = time.monotonic() - t_start
+    print(
+        f"\n=== ARCHIVE EXTRACT COMPLETE ===\n"
+        f"  Shards:    {len(shards)}\n"
+        f"  Files:     {extracted_total}\n"
+        f"  Dest:      {dest}\n"
+        f"  Elapsed:   {elapsed/60:.1f}m"
+    )
 
 
 def cmd_list(args):
@@ -259,6 +399,24 @@ def main():
     p.add_argument("--metadata-dir", default=None,
                    help="Local dir to write metadata JSONs into (optional).")
     p.set_defaults(func=cmd_download_manifest)
+
+    p = sub.add_parser(
+        "download-archive",
+        help="Download + extract dataset shards for a given mode (use on Lambda).",
+    )
+    p.add_argument(
+        "--mode", choices=["pilot", "full"], default="full",
+        help="Dataset mode: pilot (~10K) or full (~124K). Default: full.",
+    )
+    p.add_argument(
+        "--dest", required=True,
+        help="Local directory to extract images+captions into.",
+    )
+    p.add_argument(
+        "--r2-prefix", default=None,
+        help="Override R2 prefix (default: datasets/soyjak-sdxl-<mode>).",
+    )
+    p.set_defaults(func=cmd_download_archive)
 
     p = sub.add_parser("list", help="List objects under a prefix.")
     p.add_argument("--prefix", default="datasets/soyjak-sdxl")

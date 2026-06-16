@@ -5,11 +5,13 @@
 # (env, data transfer, captions, the model actually learning distinct variants)
 # cheaply before committing to the full ~124k run.
 #
-# Step math: ~10,000 images / batch_size 4 = ~2,500 steps per epoch.
-# max_train_steps = 7500 is ~3 epochs: enough to see variants emerge in samples
-# without burning many GPU-hours. Expect roughly 1-2 hours on a single A100.
+# Tuned for 2× H100 80GB (DDP). Effective batch = 8 (per GPU) × 2 = 16.
+# Step math: ~10,000 images / effective batch 16 = ~625 steps per epoch.
+# max_train_steps = 2000 is ~3 epochs: enough to see variants emerge in samples
+# without burning many GPU-hours. Expect roughly 30-60 min on 2× H100.
 #
-# The full run uses train/config.toml instead.
+# IMPORTANT: train_batch_size is PER GPU and must match BATCH_SIZE in
+# train_lora.sh. The full run uses train/config.toml instead.
 
 # --- base model ---
 pretrained_model_name_or_path = "/home/ubuntu/models/sd_xl_base_1.0_fixvae_fp16.safetensors"
@@ -21,8 +23,8 @@ output_dir = "/home/ubuntu/out"
 output_name = "soyjak-lora-sdxl-pilot"   # distinct name so it won't collide with full run
 save_model_as = "safetensors"
 save_precision = "fp16"
-save_every_n_steps = 1500
-save_last_n_steps = 7500
+save_every_n_steps = 500
+save_last_n_steps = 2000
 
 # --- LoRA network ---
 network_module = "networks.lora"
@@ -40,14 +42,15 @@ persistent_data_loader_workers = true
 max_data_loader_n_workers = 8
 
 # --- optimizer / schedule ---
+# LR scaled up for the 4× larger effective batch (4 → 16), matching config.toml.
 optimizer_type = "AdamW8bit"
-learning_rate = 1e-4
-unet_lr = 1e-4
-text_encoder_lr = 5e-5
+learning_rate = 1.5e-4
+unet_lr = 1.5e-4
+text_encoder_lr = 7.5e-5
 lr_scheduler = "cosine_with_restarts"
-lr_warmup_steps = 200
-max_train_steps = 7500          # ~3 epochs over 10k images
-train_batch_size = 4            # keep in sync with the pilot dataset.toml
+lr_warmup_steps = 60            # ~3% of max_train_steps
+max_train_steps = 2000          # ~3 epochs over 10k images at effective batch 16
+train_batch_size = 8            # PER GPU; must match BATCH_SIZE in train_lora.sh
 gradient_accumulation_steps = 1
 max_grad_norm = 1.0
 seed = 42
@@ -59,6 +62,6 @@ min_snr_gamma = 5
 # --- logging / samples ---
 logging_dir = "/home/ubuntu/logs"
 log_with = "tensorboard"
-sample_every_n_steps = 1500
+sample_every_n_steps = 500
 sample_sampler = "euler_a"
 sample_prompts = "/home/ubuntu/sample_prompts.txt"

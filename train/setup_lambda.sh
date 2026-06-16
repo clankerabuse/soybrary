@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup_lambda.sh - Phase 4: prepare a Lambda Labs A100 instance for SDXL LoRA
+# setup_lambda.sh - Phase 4: prepare a Lambda Labs GPU instance for SDXL LoRA
 # training with kohya-ss/sd-scripts.
 #
 # Run this ONCE on a fresh Lambda Labs instance (Ubuntu, Lambda Stack preinstalled).
@@ -8,8 +8,14 @@
 #
 #   bash train/setup_lambda.sh
 #
+# Multi-GPU: the generated accelerate config auto-detects the number of visible
+# GPUs (nvidia-smi) and configures DDP (MULTI_GPU) when >1 is present. On a
+# 2× H100 box this trains both GPUs out of the box; on a single GPU it falls
+# back to distributed_type NO. Override with NUM_GPUS=N if needed.
+#
 # Pinned, verified versions (see train/requirements-lock.txt):
 #   Python 3.10, torch 2.6.0 + cu124, sd-scripts tag v0.10.6
+#   (cu124 supports Hopper/H100 — no change needed vs A100.)
 set -euo pipefail
 
 SDSCRIPTS_TAG="v0.10.6"          # stable release BEFORE the v0.11.0 refactor
@@ -86,19 +92,28 @@ cd "$WORKDIR"
 echo "==> Installing R2 sync deps"
 pip install "boto3>=1.34.0,<1.36.0" "botocore>=1.34.0,<1.36.0" python-dotenv huggingface_hub
 
-# --- accelerate config (non-interactive, single A100, bf16) -----------------
-echo "==> Writing accelerate config (single GPU, bf16)"
+# --- accelerate config (non-interactive, auto multi-GPU, bf16) --------------
+# Detect visible GPUs so a 2× H100 box trains with DDP automatically. Override
+# with NUM_GPUS=N (e.g. NUM_GPUS=1 to force single-GPU on a multi-GPU host).
+NUM_GPUS="${NUM_GPUS:-$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)}"
+[ "$NUM_GPUS" -ge 1 ] 2>/dev/null || NUM_GPUS=1
+if [ "$NUM_GPUS" -gt 1 ]; then
+  DISTRIBUTED_TYPE="MULTI_GPU"
+else
+  DISTRIBUTED_TYPE="'NO'"
+fi
+echo "==> Writing accelerate config ($NUM_GPUS GPU(s), distributed_type=$DISTRIBUTED_TYPE, bf16)"
 mkdir -p "$HOME/.cache/huggingface/accelerate"
-cat > "$HOME/.cache/huggingface/accelerate/default_config.yaml" <<'YAML'
+cat > "$HOME/.cache/huggingface/accelerate/default_config.yaml" <<YAML
 compute_environment: LOCAL_MACHINE
-distributed_type: 'NO'
+distributed_type: $DISTRIBUTED_TYPE
 downcast_bf16: 'no'
 gpu_ids: all
 machine_rank: 0
 main_training_function: main
 mixed_precision: bf16
 num_machines: 1
-num_processes: 1
+num_processes: $NUM_GPUS
 rdzv_backend: static
 same_network: true
 tpu_use_cluster: false

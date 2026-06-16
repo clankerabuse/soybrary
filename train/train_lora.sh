@@ -13,6 +13,15 @@ WORKDIR="${WORKDIR:-$HOME}"
 SDSCRIPTS_DIR="${SDSCRIPTS_DIR:-$WORKDIR/sd-scripts}"
 MODEL="/home/ubuntu/models/sd_xl_base_1.0_fixvae_fp16.safetensors"
 
+# --- GPU count + per-GPU batch size -----------------------------------------
+# NUM_GPUS drives accelerate --num_processes (DDP across GPUs). BATCH_SIZE is the
+# PER-GPU batch and must match train_batch_size in the chosen config_*.toml.
+# Effective batch = BATCH_SIZE * NUM_GPUS. Defaults tuned for 2× H100 80GB
+# (per-GPU 8 → effective 16). Override either via env if your box differs.
+NUM_GPUS="${NUM_GPUS:-$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)}"
+[ "$NUM_GPUS" -ge 1 ] 2>/dev/null || NUM_GPUS=1
+BATCH_SIZE="${BATCH_SIZE:-8}"
+
 MODE="${MODE:-pilot}"
 if [ "$MODE" = "pilot" ]; then
     TRAIN_DATA="${TRAIN_DATA:-/home/ubuntu/train_data_pilot}"
@@ -44,7 +53,7 @@ bucket_no_upscale = true
 
 [[datasets]]
 resolution = [1024, 1024]
-batch_size = 4
+batch_size = $BATCH_SIZE
 min_bucket_reso = 512
 max_bucket_reso = 2048
 
@@ -89,8 +98,12 @@ echo "==> Launching SDXL LoRA training (MODE=$MODE)"
 echo "    train config:    $CONFIG"
 echo "    dataset config:  $DATASET_CONFIG"
 echo "    image_dir:       $TRAIN_DATA"
+echo "    GPUs:            $NUM_GPUS"
+echo "    per-GPU batch:   $BATCH_SIZE  (effective batch = $((BATCH_SIZE * NUM_GPUS)))"
 
-accelerate launch --num_cpu_threads_per_process 8 \
+# --num_processes is passed explicitly so the launch is correct even if the
+# cached accelerate default_config.yaml is stale. With NUM_GPUS>1 this runs DDP.
+accelerate launch --num_processes "$NUM_GPUS" --num_cpu_threads_per_process 8 \
     sdxl_train_network.py \
     --config_file "$CONFIG" \
     --dataset_config "$DATASET_CONFIG"

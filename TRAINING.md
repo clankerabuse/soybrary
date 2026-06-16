@@ -6,7 +6,7 @@
 - `data/images/` — 156,570 image files (`{id}.{ext}`)
 - `data/metadata/` — 167,071 JSON files (`{id}.json`) with tags, variants, subvariants
 - `data/soybooru.db` — SQLite index of all posts
-- These are also mirrored on **Cloudflare R2** (`soyjak-training` bucket) under `images/` and `metadata/`
+- These are also mirrored on **Cloudflare R2** (`soyjak-training` bucket) under `images/` and `metadata/` (legacy individual files), and packaged as tar shards under `datasets/soyjak-sdxl-{full,pilot}/` for fast Lambda pulls
 
 The goal is to train an **SDXL LoRA** on the ~124K usable static images so it can generate soyjak variants on demand.
 
@@ -18,13 +18,15 @@ The goal is to train an **SDXL LoRA** on the ~124K usable static images so it ca
 - **boto3/botocore pinned `<1.36.0`** to avoid Cloudflare R2 CRC32 checksum breakage introduced in 1.36.
 - **DreamBooth-style dataset** (image + `.txt` sidecar per image, flat directory). NOT the kohya fine-tuning `metadata_file` style — mixing these causes `voluptuous.error.MultipleInvalid`.
 - **SDXL base model:** `bdsqlsz/stable-diffusion-xl-base-1.0_fixvae_fp16` (fixed VAE). Do NOT set `vae = ""` in config — sd-scripts treats that as an empty HF repo id and crashes.
-- **Training target:** Lambda Labs GPU cloud. Images pulled directly from R2 on the instance — no local repackaging needed.
+- **Training target:** Lambda Labs GPU cloud, **plain Ubuntu 22.04** image (NOT Lambda Stack). Lambda Stack has a driver/FM pairing bug on 2× H100 SXM that leaves `Fabric State: In Progress` and blocks CUDA init (error 802). Plain Ubuntu installs a clean driver and the fabric reaches `Completed` without issue.
+- **Multi-GPU (2× H100):** `setup_lambda.sh` auto-detects GPU count and writes an accelerate DDP config (`distributed_type: MULTI_GPU`, `num_processes: N`) when >1 GPU is present. `train_lora.sh` passes `--num_processes` explicitly. Per-GPU batch is `BATCH_SIZE` (default 8) and **must match `train_batch_size`** in the config; effective batch = `BATCH_SIZE × NUM_GPUS` (8 × 2 = 16). LR was scaled `1e-4 → 1.5e-4` (moderate sqrt-style bump) for the 4× larger effective batch. Override with `NUM_GPUS=` / `BATCH_SIZE=` env vars for a different box.
+- **SSH key:** `~/.ssh/soyjak-training-new.pem` (the `soyjak-training-new` Lambda key pair). Old key was `lambda-training.pem` (retired after pilot).
 
-## Repository structure (all on branch `test/sdxl-lora-pipeline`)
+## Repository structure
 
 ```
 build_dataset.py        # Phase 1: filter DB, build captions, emit JSONL manifest
-package_dataset.py      # Phase 2: (optional) tar shards — NOT needed, R2 already has images
+package_dataset.py      # Phase 2: tar shards (images + baked-in .txt captions) → upload to R2
 r2_sync.py              # R2 upload/download helper (boto3, checksum workaround)
 requirements.txt        # Updated with boto3/botocore/python-dotenv pins
 .env.example            # Template for R2 + Lambda + HF credentials
@@ -32,13 +34,12 @@ requirements.txt        # Updated with boto3/botocore/python-dotenv pins
 
 train/
   setup_lambda.sh       # Run once on Lambda: installs Python 3.10 venv, torch, sd-scripts
-  pull_data.sh          # Fetches manifest from R2, downloads images+metadata, gen captions
-  gen_captions.py       # Reads metadata/{id}.json, writes {id}.txt caption sidecars
+  pull_data.sh          # Downloads tar shards from R2 and extracts them (captions baked in)
+  gen_captions.py       # Legacy: only needed if rebuilding captions outside the shard pipeline
   train_lora.sh         # Generates dataset.toml, downloads base model, launches training
   push_model.sh         # Uploads trained LoRA .safetensors to R2 (must run before shutdown)
-  config_pilot.toml     # Pilot run config: 7500 steps (~3 epochs over 10K images)
-  config.toml           # Full run config: 30000 steps (~1 epoch over 124K images)
-  config_pilot.toml     # Pilot: max_train_steps=7500, output_name=soyjak-lora-sdxl-pilot
+  config_pilot.toml     # Pilot run config: 2000 steps (~3 epochs over 10K images at eff. batch 16)
+  config.toml           # Full run config: 12000 steps (~1.5 epochs over 124K images at eff. batch 16)
   sample_prompts.txt    # Sample prompts for mid-training previews (tests variant separation)
   requirements-lock.txt # Pinned versions with rationale
 
@@ -59,12 +60,24 @@ data/manifests/         # gitignored (lives under data/ which is gitignored)
 ## R2 bucket structure (`soyjak-training`)
 
 ```
-images/{id}.{ext}                       # all scraped images (~156K files)
-metadata/{id}.json                      # all metadata JSONs (~167K files)
+images/{id}.{ext}                       # all scraped images (~156K files, legacy individual files)
+metadata/{id}.json                      # all metadata JSONs (~167K files, legacy)
 manifests/dataset.jsonl                 # full 124K manifest
 manifests/dataset_pilot10k.jsonl        # pilot 10K manifest
-models/soyjak-lora-sdxl-pilot/          # pilot LoRA output (after push_model.sh)
-models/soyjak-lora-sdxl/                # full run LoRA output (after push_model.sh)
+
+datasets/soyjak-sdxl-full/             # packaged full dataset (from package_dataset.py)
+  shard_manifest.json                  #   shard list + sha256 + counts
+  shards/shard_0000.tar                #   flat tar: {id}.{ext} + {id}.txt per image
+  shards/shard_0001.tar
+  ...
+
+datasets/soyjak-sdxl-pilot/            # packaged pilot dataset
+  shard_manifest.json
+  shards/shard_0000.tar
+  ...
+
+models/soyjak-lora-sdxl-pilot/         # pilot LoRA output (after push_model.sh)
+models/soyjak-lora-sdxl/               # full run LoRA output (after push_model.sh)
 ```
 
 ## MODE system
@@ -77,113 +90,148 @@ All train/ scripts accept `MODE=pilot` (default) or `MODE=full`:
 | Images | 10,000 | 123,778 |
 | image_dir on Lambda | `/home/ubuntu/train_data_pilot` | `/home/ubuntu/train_data` |
 | Train config | `config_pilot.toml` | `config.toml` |
-| Steps | 7,500 (~3 epochs) | 30,000 (~1 epoch) |
+| Steps (2×H100, eff. batch 16) | 2,000 (~3 epochs) | 12,000 (~1.5 epochs) |
 | R2 model prefix | `models/soyjak-lora-sdxl-pilot` | `models/soyjak-lora-sdxl` |
-| Expected time (A100) | ~9-10 hrs total | ~15-20 hrs total |
-| Expected time (2×H100) | ~2-3 hrs total | ~3-4 hrs total |
+| Expected time (2×H100) | ~30-60 min | ~4-5 hrs total (data pull ~30-60 min + latent caching + training) |
 
-## Current state (as of session 2 completion)
+## Training config key values (2× H100, full run)
 
-**Pilot run COMPLETE.** Started June 13 2026 ~14:24 UTC, finished ~17:20 UTC (~3 hours total).
+| Setting | Value | Notes |
+|---|---|---|
+| `train_batch_size` | 8 | per GPU; effective batch = 16 |
+| `max_train_steps` | 12,000 | ~1.5 epochs over 123,778 images |
+| `learning_rate` / `unet_lr` | 1.5e-4 | scaled up from 1e-4 for 4× larger effective batch |
+| `text_encoder_lr` | 7.5e-5 | scaled proportionally |
+| `lr_warmup_steps` | 240 | ~2% of max_train_steps |
+| `save_every_n_steps` | 1,000 | 12 checkpoints total |
+| `sample_every_n_steps` | 1,000 | sample images at each checkpoint |
 
-- Branch: `test/sdxl-lora-pipeline` (4 commits ahead of main, including GPU hardening fixes)
-- Instance: Lambda Labs A100-SXM4-40GB at `<instance-ip>` (now terminated after `push_model.sh`)
-- SSH key: `~/.ssh/lambda-training.pem` (instance no longer running)
+## Instance selection
 
-**Pilot training summary:**
-- Dataset: 9,994 images (10K pilot stratified subset), 2,576 batches/epoch, 3 epochs → 7,500 steps
-- **Latent caching:** ~25 min (GPU-bound at ~2.8 it/s after resuming from CPU-cached state)
-- **Training steps:** ~2.9 hrs (~1.42 s/it average, A100 at full capacity)
-- **Sample checkpoints:** generated at steps 1500, 3000, 4500, 6000, 7500
-  - Samples available locally: `~/Downloads/soyjak-samples/sample/soyjak-lora-sdxl-pilot_*.png`
-  - Samples show distinct variant rendering (chudjak, cobson, gapejak, etc. visually separating)
+**Always use: Lambda Labs → plain Ubuntu 22.04 (NOT Lambda Stack)**
 
-**LoRA checkpoints on R2** (`soyjak-training` bucket):
-- `models/soyjak-lora-sdxl-pilot-step00001500.safetensors` (229 MB)
-- `models/soyjak-lora-sdxl-pilot-step00003000.safetensors` (229 MB)
-- `models/soyjak-lora-sdxl-pilot-step00004500.safetensors` (229 MB)
-- `models/soyjak-lora-sdxl-pilot-step00006000.safetensors` (229 MB)
-- `models/soyjak-lora-sdxl-pilot-step00007500.safetensors` (229 MB) — **use this for generation**
-- `models/soyjak-lora-sdxl-pilot.safetensors` (229 MB) — symlink to final (step 7500)
+Lambda Stack 22.04 has a driver/Fabric Manager version mismatch on 2× H100 SXM that leaves
+both GPUs stuck at `Fabric State: In Progress`, blocking CUDA init with error 802. This happens
+on every Lambda Stack host consistently — it is a Lambda infra issue, not fixable without
+re-imaging. Plain Ubuntu 22.04 installs a clean driver and fabric reaches `Completed: Success`.
 
-All pushed to R2 at 2026-06-13 12:15:59–12:16:20 CDT (note: step timestamps differ from wall clock due to when checkpoint logic triggered).
-
-### Hardening fixes applied (commit 9312a4e)
-
-The first launch silently ran on CPU for ~9.5 hours due to a missing NVIDIA driver. Fixed:
-
-- `setup_lambda.sh` now:
-  - Installs `nvidia-driver-550-server` if GPU is present but driver is missing
-  - Installs `python3.10-dev` + `build-essential` (required for Triton CUDA JIT)
-  - Asserts `torch.cuda.is_available()` at end; fails if False
-- `train_lora.sh` now asserts CUDA before launch (prevents silent CPU fallback)
-- Both scripts will now error loudly instead of silently training on CPU
-
-## Next steps / for next session
-
-**To test the pilot LoRA locally:**
+After launching, always sanity-check before running setup:
 ```bash
-# Download final model from R2:
-.venv/bin/python r2_sync.py download --prefix models/soyjak-lora-sdxl-pilot/step00007500 --dest ./pilot_lora
-
-# Use in ComfyUI / A1111 with prompts like:
-# - "chudjak, open_mouth, glasses"
-# - "cobson, smug"
-# - "gapejak, wholesome_soyjak, stubble"
+nvidia-smi -q | grep -A2 "Fabric$"
+# Must show: State: Completed / Status: Success on both GPUs
+# If it shows "In Progress" → terminate and relaunch (bad host)
 ```
 
-**Decision tree:**
-- **If pilot quality is good** → run full dataset: `MODE=full` on 2× H100 SXM (~$6.58/hr, ~3-4 hrs, ~30K steps)
-- **If pilot quality is bad** → check sample images (`~/Downloads/soyjak-samples/sample/`), tweak learning rate or steps in `config_pilot.toml`, re-run pilot
-- **For faster iteration** → use 2× or 4× H100 (reduces ~9 hrs caching+training to ~2-3 hrs)
+## Session history
 
-## Next steps after pilot
+### Session 1 — Pilot run (June 13 2026)
+- Instance: Lambda Labs A100-SXM4-40GB at `<instance-ip>` (terminated)
+- SSH key: `~/.ssh/lambda-training.pem` (retired)
+- Result: **COMPLETE.** 9,994 images, 7,500 steps (~3 epochs), ~3 hrs total
+- Samples: `~/Downloads/soyjak-samples/sample/soyjak-lora-sdxl-pilot_*.png`
+- Checkpoints on R2: `models/soyjak-lora-sdxl-pilot-step*.safetensors` (229 MB each)
 
-- If output quality is good → run full dataset with `MODE=full` on **2× H100 SXM** (~$6.58/hr, ~3-4 hrs)
-- If output is bad → diagnose (check sample images generated mid-training at `/home/ubuntu/out/sample/`), adjust learning rate or steps in `config_pilot.toml`, re-run pilot
-- For iteration → 2× or 4× H100 recommended (caching + training drops from 10 hrs to ~2-3 hrs)
+### Session 2 — Full run setup (June 15 2026)
+- SSH key: `~/.ssh/soyjak-training-new.pem` (key pair: `soyjak-training-new`)
+- Lambda API key: `...` (in `.env` as `LAMBDA_API_KEY`)
+- Discovered: Lambda Stack 22.04 broken on 2× H100 SXM (Fabric State stuck In Progress)
+- Fix: plain Ubuntu 22.04 + manual driver install → fabric reaches Completed
+- Instance: `<instance-ip>` — full run in progress
 
-## Full workflow (next time, from scratch)
+## Known issues and fixes
 
+1. **`vae = ""`** in config causes crash — sd-scripts treats it as an empty HF repo. Key must be omitted entirely.
+2. **`libGL.so.1` missing** on Lambda Ubuntu — `cv2` fails to import. Fixed by adding `libgl1 libglib2.0-0` to `setup_lambda.sh`.
+3. **boto3 ≥1.36 CRC32 checksum** breaks R2 uploads. Pinned `<1.36.0` in requirements.
+4. **sd-scripts v0.11.0** released June 12 2026 — major refactor, untested. Pinned to v0.10.6.
+5. **DB `extension` column unreliable** (says `jpg` for `.png` files). Always trust filesystem extension.
+6. **kohya `metadata_file`** style incompatible with raw scraper JSON. Use DreamBooth style (`.txt` sidecars) only.
+7. **Silent CPU fallback** — Lambda host can boot without NVIDIA driver. Fixed: `setup_lambda.sh` installs driver if missing and both scripts assert `torch.cuda.is_available()` before proceeding.
+8. **`Python.h` missing / Triton compile fail** — Triton JIT needs `python3.10-dev` + `build-essential`. Now installed by `setup_lambda.sh`.
+9. **Lambda Stack 2× H100 SXM — Fabric State stuck "In Progress" / CUDA error 802** — Driver/FM version mismatch in Lambda Stack image. FM reports "Pre-NVL5 / Nothing to do" and exits; GPUs never leave In Progress. Not fixable by reboot or FM config. Fix: use plain Ubuntu 22.04 instead.
+
+---
+
+## Command cheat-sheet
+
+### Local — one-time / when manifest or images change
 ```bash
-# Local — already done, don't redo unless DB updated:
-python build_dataset.py                          # regenerate manifest if new images scraped
-# python build_dataset.py --limit 10000 --out data/manifests/dataset_pilot10k.jsonl
+cd /path/to/soybrary
 
-# Local — upload manifests if regenerated:
-.venv/bin/python r2_sync.py upload-file --src data/manifests/dataset_pilot10k.jsonl --key manifests/dataset_pilot10k.jsonl
+# Regenerate manifest (only if new images scraped since last run):
+.venv/bin/python build_dataset.py
+
+# Re-upload manifest to R2:
 .venv/bin/python r2_sync.py upload-file --src data/manifests/dataset.jsonl --key manifests/dataset.jsonl
 
-# Copy scripts to Lambda (minimal — just what's needed):
-scp -i ~/.ssh/lambda-training.pem /path/to/soybrary/r2_sync.py ubuntu@<ip>:~/soybrary/
-scp -i ~/.ssh/lambda-training.pem -r /path/to/soybrary/train ubuntu@<ip>:~/soybrary/
+# Package images+captions into tar shards and upload to R2 (full run, ~80 GB):
+.venv/bin/python package_dataset.py --mode full
 
-# On Lambda:
+# Package pilot subset only (~10 GB):
+.venv/bin/python package_dataset.py --mode pilot
+
+# Package only (no upload), e.g. to inspect shards first:
+.venv/bin/python package_dataset.py --mode full --no-upload
+
+# Upload already-packaged shards (skip re-packaging):
+.venv/bin/python package_dataset.py --mode full --upload-only
+```
+
+### Local — copy scripts to a new instance
+```bash
+IP=<instance-ip>
+KEY=~/.ssh/soyjak-training-new.pem
+
+ssh -i $KEY ubuntu@$IP 'mkdir -p ~/soybrary'
+scp -i $KEY /path/to/soybrary/r2_sync.py ubuntu@$IP:~/soybrary/
+scp -i $KEY -r /path/to/soybrary/train ubuntu@$IP:~/soybrary/
+```
+
+### On the instance — sanity check first (before anything else)
+```bash
+# Both GPUs must show "State: Completed" — if "In Progress", terminate and relaunch
+nvidia-smi -q | grep -A2 "Fabric$"
+nvidia-smi -L   # expect: GPU 0: NVIDIA H100 80GB HBM3 / GPU 1: NVIDIA H100 80GB HBM3
+```
+
+### On the instance — setup (once per fresh instance)
+```bash
 export R2_ACCOUNT_ID="..."
 export R2_ACCESS_KEY_ID="..."
 export R2_SECRET_ACCESS_KEY="..."
 export R2_BUCKET_NAME="soyjak-training"
-export R2_ENDPOINT="https://<account_id>.r2.cloudflarestorage.com"
+export R2_ENDPOINT="https://....r2.cloudflarestorage.com"
 
 cd ~/soybrary
 bash train/setup_lambda.sh
+# Expected output: "2 GPU(s), distributed_type=MULTI_GPU, bf16" + "CUDA OK: NVIDIA H100 80GB HBM3"
+
 source ~/sd-venv/bin/activate
-
-TERM=xterm-256color tmux new -s training
-MODE=pilot bash train/pull_data.sh      # fetches manifest, downloads 10K images+metadata, gen captions
-MODE=pilot bash train/train_lora.sh     # downloads SDXL base, generates dataset.toml, trains
-
-# Before terminating:
-MODE=pilot bash train/push_model.sh
 ```
 
-## Known issues fixed in this session
+### On the instance — pull data + train (in tmux)
+```bash
+TERM=xterm-256color tmux new -s training
+# (re-export R2 env vars inside tmux if needed)
 
-1. **`vae = ""`** in config causes crash — sd-scripts treats it as an empty HF repo. Key must be omitted entirely. Fixed in `config.toml` and `config_pilot.toml`.
-2. **`libGL.so.1` missing** on Lambda Ubuntu — `cv2` fails to import. Fixed by adding `libgl1 libglib2.0-0` to `setup_lambda.sh`.
-3. **boto3 ≥1.36 CRC32 checksum** breaks R2 uploads. Fixed by pinning `<1.36.0` and conditional `request_checksum_calculation` workaround in `r2_sync.py`.
-4. **sd-scripts v0.11.0** released same day (June 12 2026) — major refactor, untested. Pinned to v0.10.6.
-5. **DB `extension` column unreliable** (says `jpg` for `.png` files). Always trust filesystem extension, not DB.
-6. **kohya `metadata_file`** style is incompatible with raw scraper JSON format. Use DreamBooth style (`.txt` sidecars) only.
-7. **Silent CPU fallback** — a Lambda host can boot WITHOUT the NVIDIA driver. accelerate then prints `accelerator device: cpu` and trains ~100x slower with no hard error. Diagnose with `nvidia-smi` / `python -c "import torch; print(torch.cuda.is_available())"`. Fix: `sudo apt-get install -y nvidia-driver-550-server && sudo modprobe nvidia nvidia_uvm`. `setup_lambda.sh` now installs the driver if missing and both scripts assert CUDA before proceeding.
-8. **`Python.h` missing / Triton compile fail** — once CUDA is active, Triton JIT-compiles `cuda_utils` and needs `python3.10-dev` + `build-essential`. Without them the launch dies with `fatal error: Python.h: No such file or directory`. Now installed by `setup_lambda.sh`.
+# pull_data.sh now downloads tar shards from R2 and extracts them directly —
+# no separate metadata fetch or gen_captions step. Captions are baked into the shards.
+# Each shard is streamed, sha256-verified, extracted, then the shard file is deleted
+# (peak extra disk = one shard at a time).
+MODE=full bash train/pull_data.sh      # ~30-60 min depending on bandwidth
+MODE=full bash train/train_lora.sh     # ~3-4 hrs; log shows "GPUs: 2 / effective batch = 16"
+
+# Detach: Ctrl-b d   |   Reattach: tmux attach -t training
+```
+
+### On the instance — push model before terminating
+```bash
+MODE=full bash train/push_model.sh
+# Uploads all .safetensors under /home/ubuntu/out/ to r2://soyjak-training/models/soyjak-lora-sdxl/
+```
+
+### Local — download the trained LoRA
+```bash
+cd /path/to/soybrary
+.venv/bin/python r2_sync.py download --prefix models/soyjak-lora-sdxl --dest ./full_lora
+```

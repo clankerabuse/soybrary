@@ -12,6 +12,7 @@ For each completed static image (PNG/JPEG/WebP) it:
   - builds a booru-style caption: dedup(variants + subvariants + tags),
     with variants first so kohya's keep_tokens can pin them,
   - applies a minimum short-side resolution filter (default 512px),
+  - applies a maximum long-side filter (default 2048px; matches kohya buckets),
   - drops images that would have an empty caption.
 
 Output:
@@ -31,6 +32,11 @@ import sqlite3
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -76,6 +82,20 @@ def build_caption(meta):
     parts.extend(meta.get("tags") or [])
     tags = dedup_preserve_order(parts)
     return ", ".join(tags)
+
+
+def image_is_readable(path: Path) -> bool:
+    """Return False for truncated/corrupt images that would crash sd-scripts."""
+    if Image is None:
+        sys.exit("ERROR: Pillow required for --validate-images. pip install Pillow")
+    try:
+        with Image.open(path) as img:
+            img.verify()
+        with Image.open(path) as img:
+            img.load()
+        return True
+    except Exception:
+        return False
 
 
 def index_images():
@@ -151,6 +171,14 @@ def main():
         "Set 0 to keep all. Default: 512",
     )
     ap.add_argument(
+        "--max-long-side",
+        type=int,
+        default=2048,
+        help="Maximum image long side in px. Images larger than this are excluded "
+        "(matches kohya max_bucket_reso; huge sources waste latent-cache time). "
+        "Set 0 to keep all. Default: 2048",
+    )
+    ap.add_argument(
         "--out",
         type=Path,
         default=MANIFESTS_DIR / "dataset.jsonl",
@@ -170,6 +198,13 @@ def main():
         type=int,
         default=42,
         help="Random seed for --limit sampling (reproducible pilot sets).",
+    )
+    ap.add_argument(
+        "--validate-images",
+        action="store_true",
+        help="Open each image with Pillow and drop corrupt/truncated files. "
+        "Slower locally but prevents sd-scripts crashes on Lambda. "
+        "Recommended before package_dataset.py.",
     )
     args = ap.parse_args()
 
@@ -236,6 +271,14 @@ def main():
             stats["below_min_resolution"] += 1
             continue
 
+        if args.max_long_side > 0 and max(width, height) > args.max_long_side:
+            stats["above_max_resolution"] += 1
+            continue
+
+        if args.validate_images and not image_is_readable(img_path):
+            stats["corrupt_image"] += 1
+            continue
+
         caption = build_caption(meta)
         if not caption:
             stats["empty_caption"] += 1
@@ -278,6 +321,7 @@ def main():
         "seed": args.seed,
         "excluded": dict(stats),
         "min_short_side": args.min_short_side,
+        "max_long_side": args.max_long_side,
         "top_variants": variant_counter.most_common(20),
         "manifest_path": str(args.out),
     }

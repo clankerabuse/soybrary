@@ -6,7 +6,7 @@
 #
 # TARGET ENVIRONMENT
 #   Python:      3.10.x        (sd-scripts is tested on 3.10; 3.11/3.12 untested)
-#   GPU:         NVIDIA A100 80GB (Lambda Labs gpu_1x_a100 / gpu_1x_a100_sxm4)
+#   GPU:         2× NVIDIA H100 80GB SXM (Lambda Labs gpu_2x_h100_sxm5)
 #   CUDA:        12.4
 #   sd-scripts:  git tag v0.10.6  (stable release BEFORE the v0.11.0 refactor)
 #
@@ -22,14 +22,10 @@
 #   cd sd-scripts && git checkout v0.10.6
 #   pip install --use-pep517 -r requirements.txt
 #
-# `accelerate config` answers for a single A100:
-#   - This machine
-#   - No distributed training
-#   - NO  (run on CPU only?)
-#   - NO  (torch dynamo?)
-#   - NO  (DeepSpeed?)
-#   - all (GPU ids)
-#   - bf16  (A100 supports bf16; preferred over fp16)
+# `accelerate config` is written automatically by setup_lambda.sh. For 2× H100:
+#   - distributed_type: MULTI_GPU
+#   - num_processes: 2
+#   - mixed_precision: bf16
 # ============================================================================
 
 # --- R2 / S3 client (dataset + model transfer) ---

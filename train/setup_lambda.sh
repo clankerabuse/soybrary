@@ -58,6 +58,20 @@ fi
 echo "==> nvidia-smi OK:"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
 
+# --- Multi-GPU fabric sanity (2× H100 SXM on Lambda Stack breaks here) ------
+NUM_GPUS_CHECK="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)"
+if [ "$NUM_GPUS_CHECK" -gt 1 ]; then
+  if nvidia-smi -q 2>/dev/null | grep -A2 "Fabric" | grep -q "In Progress"; then
+    echo "ERROR: NVLink fabric stuck at 'In Progress' — CUDA init will fail (error 802)." >&2
+    echo "       Terminate and relaunch on plain Ubuntu 22.04 (NOT Lambda Stack)." >&2
+    exit 1
+  fi
+  echo "==> Multi-GPU fabric state OK ($NUM_GPUS_CHECK GPUs)"
+elif [ "$NUM_GPUS_CHECK" -eq 1 ]; then
+  echo "WARNING: only 1 GPU visible — this project is tuned for 2× H100 (effective batch 16)." >&2
+  echo "         Full runs on 1× GPU work but take ~4-6× longer. Prefer 2× H100 SXM 80GB." >&2
+fi
+
 # --- Python 3.10 venv -------------------------------------------------------
 if ! command -v python3.10 >/dev/null 2>&1; then
   echo "ERROR: python3.10 was not installed successfully" >&2

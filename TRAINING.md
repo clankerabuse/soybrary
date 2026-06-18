@@ -18,8 +18,8 @@ The goal is to train an **SDXL LoRA** on the ~124K usable static images so it ca
 - **boto3/botocore pinned `<1.36.0`** to avoid Cloudflare R2 CRC32 checksum breakage introduced in 1.36.
 - **DreamBooth-style dataset** (image + `.txt` sidecar per image, flat directory). NOT the kohya fine-tuning `metadata_file` style — mixing these causes `voluptuous.error.MultipleInvalid`.
 - **SDXL base model:** `bdsqlsz/stable-diffusion-xl-base-1.0_fixvae_fp16` (fixed VAE). Do NOT set `vae = ""` in config — sd-scripts treats that as an empty HF repo id and crashes.
-- **Training target:** Lambda Labs GPU cloud, **plain Ubuntu 22.04** image (NOT Lambda Stack). Lambda Stack has a driver/FM pairing bug on 2× H100 SXM that leaves `Fabric State: In Progress` and blocks CUDA init (error 802). Plain Ubuntu installs a clean driver and the fabric reaches `Completed` without issue.
-- **Multi-GPU (2× H100):** `setup_lambda.sh` auto-detects GPU count and writes an accelerate DDP config (`distributed_type: MULTI_GPU`, `num_processes: N`) when >1 GPU is present. `train_lora.sh` passes `--num_processes` explicitly. Per-GPU batch is `BATCH_SIZE` (default 8) and **must match `train_batch_size`** in the config; effective batch = `BATCH_SIZE × NUM_GPUS` (8 × 2 = 16). LR was scaled `1e-4 → 1.5e-4` (moderate sqrt-style bump) for the 4× larger effective batch. Override with `NUM_GPUS=` / `BATCH_SIZE=` env vars for a different box.
+- **Training target:** Lambda Labs **2× H100 80GB SXM** on **plain Ubuntu 22.04** (NOT Lambda Stack). Do not use 1× A100 for full runs — it works but latent caching alone can take ~8 h and training another ~12–24 h vs ~4–5 h total on 2× H100. Lambda Stack has a driver/FM pairing bug on 2× H100 SXM that leaves `Fabric State: In Progress` and blocks CUDA init (error 802). Plain Ubuntu installs a clean driver and the fabric reaches `Completed` without issue.
+- **Multi-GPU (2× H100):** `setup_lambda.sh` auto-detects GPU count and writes an accelerate DDP config (`distributed_type: MULTI_GPU`, `num_processes: 2`) when both GPUs are visible. `train_lora.sh` passes `--num_processes` explicitly. Per-GPU batch is `BATCH_SIZE` (default 8) and **must match `train_batch_size`** in the config; effective batch = `BATCH_SIZE × NUM_GPUS` (8 × 2 = 16). LR was scaled `1e-4 → 1.5e-4` (moderate sqrt-style bump) for the 4× larger effective batch. Override with `NUM_GPUS=` / `BATCH_SIZE=` env vars only when debugging.
 - **SSH key:** `~/.ssh/soyjak-training-new.pem` (the `soyjak-training-new` Lambda key pair). Old key was `lambda-training.pem` (retired after pilot).
 
 ## Repository structure
@@ -38,6 +38,7 @@ train/
   gen_captions.py       # Legacy: only needed if rebuilding captions outside the shard pipeline
   train_lora.sh         # Generates dataset.toml, downloads base model, launches training
   push_model.sh         # Uploads trained LoRA .safetensors to R2 (must run before shutdown)
+  prune_bad_images.py   # Drop corrupt images (auto-run by pull_data.sh + train_lora.sh)
   config_pilot.toml     # Pilot run config: 2000 steps (~3 epochs over 10K images at eff. batch 16)
   config.toml           # Full run config: 12000 steps (~1.5 epochs over 124K images at eff. batch 16)
   sample_prompts.txt    # Sample prompts for mid-training previews (tests variant separation)
@@ -92,7 +93,42 @@ All train/ scripts accept `MODE=pilot` (default) or `MODE=full`:
 | Train config | `config_pilot.toml` | `config.toml` |
 | Steps (2×H100, eff. batch 16) | 2,000 (~3 epochs) | 12,000 (~1.5 epochs) |
 | R2 model prefix | `models/soyjak-lora-sdxl-pilot` | `models/soyjak-lora-sdxl` |
-| Expected time (2×H100) | ~30-60 min | ~4-5 hrs total (data pull ~30-60 min + latent caching + training) |
+| Expected time (2×H100) | ~30-60 min | ~4-5 hrs total |
+| Expected time (1×A100, avoid) | ~2-3 hrs | ~20-30+ hrs total |
+
+### Timing breakdown (2× H100, full run)
+
+| Phase | ~Duration | Notes |
+|---|---|---|
+| Data pull | 30–60 min | Network-bound; same on any GPU |
+| Latent cache | 2–4 hrs | Single-GPU VAE encode + disk write; ~124k images |
+| Training (12k steps) | 2–3 hrs | DDP across both H100s, effective batch 16 |
+| **Total** | **~4–5 hrs** | After data pull completes |
+
+## Instance selection
+
+**Always use: Lambda Labs → 2× H100 80GB SXM → plain Ubuntu 22.04 (NOT Lambda Stack)**
+
+Do **not** use Lambda Stack 22.04 on 2× H100 SXM — driver/Fabric Manager version mismatch leaves
+both GPUs stuck at `Fabric State: In Progress`, blocking CUDA init with error 802. Not fixable by
+reboot. Plain Ubuntu 22.04 + `setup_lambda.sh` installs a clean driver; fabric reaches
+`Completed: Success`.
+
+**Launch checklist**
+
+1. Instance type: **gpu_2x_h100_sxm5** (or equivalent 2× H100 SXM 80GB)
+2. Image: **Ubuntu 22.04** (plain — not Lambda Stack)
+3. SSH key: `soyjak-training-new`
+4. Disk: ≥ 200 GB (images ~80 GB + latent cache ~40 GB + checkpoints + headroom)
+
+After launching, sanity-check **before** running setup:
+
+```bash
+nvidia-smi -L   # expect: GPU 0 + GPU 1: NVIDIA H100 80GB HBM3
+nvidia-smi -q | grep -A2 "Fabric$"
+# Both GPUs must show: State: Completed / Status: Success
+# If "In Progress" → terminate and relaunch (Lambda Stack host or bad image)
+```
 
 ## Training config key values (2× H100, full run)
 
@@ -105,22 +141,6 @@ All train/ scripts accept `MODE=pilot` (default) or `MODE=full`:
 | `lr_warmup_steps` | 240 | ~2% of max_train_steps |
 | `save_every_n_steps` | 1,000 | 12 checkpoints total |
 | `sample_every_n_steps` | 1,000 | sample images at each checkpoint |
-
-## Instance selection
-
-**Always use: Lambda Labs → plain Ubuntu 22.04 (NOT Lambda Stack)**
-
-Lambda Stack 22.04 has a driver/Fabric Manager version mismatch on 2× H100 SXM that leaves
-both GPUs stuck at `Fabric State: In Progress`, blocking CUDA init with error 802. This happens
-on every Lambda Stack host consistently — it is a Lambda infra issue, not fixable without
-re-imaging. Plain Ubuntu 22.04 installs a clean driver and fabric reaches `Completed: Success`.
-
-After launching, always sanity-check before running setup:
-```bash
-nvidia-smi -q | grep -A2 "Fabric$"
-# Must show: State: Completed / Status: Success on both GPUs
-# If it shows "In Progress" → terminate and relaunch (bad host)
-```
 
 ## Session history
 
@@ -138,6 +158,11 @@ nvidia-smi -q | grep -A2 "Fabric$"
 - Fix: plain Ubuntu 22.04 + manual driver install → fabric reaches Completed
 - Instance: `<instance-ip>` — full run in progress
 
+### Session 3 — Full run on 1× A100 (June 17 2026, abandoned)
+- Instance: Lambda Labs 1× A100 at `<instance-ip>` — switched away after ~8 h latent caching
+- Issue: 1× GPU ~4–6× slower than 2× H100 for full run; corrupt JPEG in shards crashed first train attempt
+- Fix: `prune_bad_images.py` added; project re-centered on 2× H100 SXM
+
 ## Known issues and fixes
 
 1. **`vae = ""`** in config causes crash — sd-scripts treats it as an empty HF repo. Key must be omitted entirely.
@@ -149,6 +174,7 @@ nvidia-smi -q | grep -A2 "Fabric$"
 7. **Silent CPU fallback** — Lambda host can boot without NVIDIA driver. Fixed: `setup_lambda.sh` installs driver if missing and both scripts assert `torch.cuda.is_available()` before proceeding.
 8. **`Python.h` missing / Triton compile fail** — Triton JIT needs `python3.10-dev` + `build-essential`. Now installed by `setup_lambda.sh`.
 9. **Lambda Stack 2× H100 SXM — Fabric State stuck "In Progress" / CUDA error 802** — Driver/FM version mismatch in Lambda Stack image. FM reports "Pre-NVL5 / Nothing to do" and exits; GPUs never leave In Progress. Not fixable by reboot or FM config. Fix: use plain Ubuntu 22.04 instead.
+10. **Corrupt/truncated images crash training** — sd-scripts dies on bad files during latent caching (Pillow full decode). `prune_bad_images.py` fully decodes each image and also drops anything with longest side > 2048px (matches `max_bucket_reso`). Auto-run by `pull_data.sh` and `train_lora.sh`. Override with `MAX_LONG_SIDE=0`. Rebuild manifests with `build_dataset.py --validate-images` before re-packaging shards.
 
 ---
 
@@ -159,7 +185,7 @@ nvidia-smi -q | grep -A2 "Fabric$"
 cd /path/to/soybrary
 
 # Regenerate manifest (only if new images scraped since last run):
-.venv/bin/python build_dataset.py
+.venv/bin/python build_dataset.py --validate-images
 
 # Re-upload manifest to R2:
 .venv/bin/python r2_sync.py upload-file --src data/manifests/dataset.jsonl --key manifests/dataset.jsonl
@@ -178,6 +204,20 @@ cd /path/to/soybrary
 ```
 
 ### Local — copy scripts to a new instance
+
+Fish shell (use `set`, not `IP=`):
+
+```fish
+set IP <instance-ip>
+set KEY ~/.ssh/soyjak-training-new.pem
+
+ssh -i $KEY ubuntu@$IP 'mkdir -p ~/soybrary'
+scp -i $KEY /path/to/soybrary/r2_sync.py ubuntu@$IP:~/soybrary/
+scp -i $KEY -r /path/to/soybrary/train ubuntu@$IP:~/soybrary/
+```
+
+Bash:
+
 ```bash
 IP=<instance-ip>
 KEY=~/.ssh/soyjak-training-new.pem
@@ -188,10 +228,14 @@ scp -i $KEY -r /path/to/soybrary/train ubuntu@$IP:~/soybrary/
 ```
 
 ### On the instance — sanity check first (before anything else)
+
+Plain Ubuntu may ship without the NVIDIA driver — `setup_lambda.sh` installs it if missing (reboot may be required).
+
 ```bash
-# Both GPUs must show "State: Completed" — if "In Progress", terminate and relaunch
+nvidia-smi -L   # expect: GPU 0 + GPU 1: NVIDIA H100 80GB HBM3
 nvidia-smi -q | grep -A2 "Fabric$"
-nvidia-smi -L   # expect: GPU 0: NVIDIA H100 80GB HBM3 / GPU 1: NVIDIA H100 80GB HBM3
+# Both GPUs must show: State: Completed / Status: Success
+# If "In Progress" → terminate and relaunch (Lambda Stack host or bad image)
 ```
 
 ### On the instance — setup (once per fresh instance)
@@ -204,24 +248,36 @@ export R2_ENDPOINT="https://....r2.cloudflarestorage.com"
 
 cd ~/soybrary
 bash train/setup_lambda.sh
-# Expected output: "2 GPU(s), distributed_type=MULTI_GPU, bf16" + "CUDA OK: NVIDIA H100 80GB HBM3"
+# Expected: "2 GPU(s), distributed_type=MULTI_GPU, bf16" + "CUDA OK: NVIDIA H100 80GB HBM3"
 
 source ~/sd-venv/bin/activate
 ```
 
 ### On the instance — pull data + train (in tmux)
+
+Kitty terminal: override TERM so tmux behaves (`xterm-kitty` breaks keybindings/colors).
+
 ```bash
 TERM=xterm-256color tmux new -s training
-# (re-export R2 env vars inside tmux if needed)
+```
 
-# pull_data.sh now downloads tar shards from R2 and extracts them directly —
-# no separate metadata fetch or gen_captions step. Captions are baked into the shards.
-# Each shard is streamed, sha256-verified, extracted, then the shard file is deleted
-# (peak extra disk = one shard at a time).
-MODE=full bash train/pull_data.sh      # ~30-60 min depending on bandwidth
-MODE=full bash train/train_lora.sh     # ~3-4 hrs; log shows "GPUs: 2 / effective batch = 16"
+Inside tmux — re-export R2 vars, then:
 
-# Detach: Ctrl-b d   |   Reattach: tmux attach -t training
+```bash
+export R2_ACCOUNT_ID="..."
+export R2_ACCESS_KEY_ID="..."
+export R2_SECRET_ACCESS_KEY="..."
+export R2_BUCKET_NAME="soyjak-training"
+export R2_ENDPOINT="https://<account-id>.r2.cloudflarestorage.com"
+
+cd ~/soybrary
+source ~/sd-venv/bin/activate
+
+# pull_data.sh downloads shards, extracts, and prunes corrupt images automatically
+MODE=full bash train/pull_data.sh      # ~30-60 min
+MODE=full bash train/train_lora.sh     # ~4-5 hrs on 2× H100 (latent cache + training)
+
+# Detach: Ctrl-b d   |   Reattach: TERM=xterm-256color tmux attach -t training
 ```
 
 ### On the instance — push model before terminating

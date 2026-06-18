@@ -82,6 +82,16 @@ fi
 [ -f "$CONFIG" ] || { echo "ERROR: train config not found: $CONFIG" >&2; exit 1; }
 [ -d "$TRAIN_DATA" ] || { echo "ERROR: TRAIN_DATA not found: $TRAIN_DATA — run pull_data.sh first" >&2; exit 1; }
 
+if [ "$NUM_GPUS" -eq 1 ]; then
+    echo "WARNING: 1 GPU detected — configs assume 2× H100 (effective batch 16)." >&2
+    echo "         Expect ~4-6× longer latent caching + training vs 2× H100." >&2
+fi
+
+# --- Prune corrupt / oversized images (idempotent; fast when data is clean) -
+MAX_LONG_SIDE="${MAX_LONG_SIDE:-2048}"
+echo "==> Pruning bad images in $TRAIN_DATA (max long side ${MAX_LONG_SIDE}px)"
+python "$REPO_DIR/train/prune_bad_images.py" "$TRAIN_DATA" --max-long-side "$MAX_LONG_SIDE"
+
 # --- Fail-fast: never silently train on CPU --------------------------------
 # accelerate will quietly fall back to CPU if the NVIDIA driver is missing,
 # turning a ~1-2h run into days. Abort loudly instead.

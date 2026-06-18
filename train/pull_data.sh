@@ -50,6 +50,11 @@ if [ "$img_count" -ne "$txt_count" ]; then
     echo "WARNING: image/caption count mismatch — re-run package_dataset.py to rebuild shards" >&2
 fi
 
+# --- 3. Drop corrupt / oversized images ------------------------------------
+MAX_LONG_SIDE="${MAX_LONG_SIDE:-2048}"
+echo "==> Pruning bad images (corrupt + longest side > ${MAX_LONG_SIDE}px)"
+python "$REPO_DIR/train/prune_bad_images.py" "$TRAIN_DATA" --max-long-side "$MAX_LONG_SIDE"
+
 echo ""
 echo "==> Data ready at $TRAIN_DATA"
 echo "    Next: bash train/train_lora.sh"

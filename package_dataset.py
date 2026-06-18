@@ -60,6 +60,8 @@ try:
 except ImportError:
     pass
 
+from image_validate import check_image_path
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
 IMAGES_DIR = DATA_DIR / "images"
@@ -173,7 +175,7 @@ def _load_manifest(path):
 # Packaging
 # ---------------------------------------------------------------------------
 
-def package(manifest_path, out_dir, shard_size_gb, image_dir_on_instance):
+def package(manifest_path, out_dir, shard_size_gb, image_dir_on_instance, validate=True):
     """Build tar shards; return shard_manifest dict."""
     records = _load_manifest(manifest_path)
     if not records:
@@ -193,6 +195,7 @@ def package(manifest_path, out_dir, shard_size_gb, image_dir_on_instance):
     written = 0
     missing_img = 0
     missing_meta = 0
+    bad_img = 0
 
     def _open_shard(idx):
         p = shards_dir / f"shard_{idx:04d}.tar"
@@ -218,6 +221,12 @@ def package(manifest_path, out_dir, shard_size_gb, image_dir_on_instance):
         if not img_path.exists():
             missing_img += 1
             continue
+
+        if validate:
+            check = check_image_path(img_path)
+            if not check.ok:
+                bad_img += 1
+                continue
 
         # Build caption: prefer manifest caption field, fall back to metadata file.
         if rec.get("caption"):
@@ -286,6 +295,7 @@ def package(manifest_path, out_dir, shard_size_gb, image_dir_on_instance):
         "total_images": written,
         "missing_images": missing_img,
         "missing_metadata": missing_meta,
+        "bad_images": bad_img,
         "num_shards": len(shard_list),
         "total_bytes": total_bytes,
         "shards": shard_list,
@@ -297,6 +307,7 @@ def package(manifest_path, out_dir, shard_size_gb, image_dir_on_instance):
     print(f"Images packaged:     {written}")
     print(f"Missing images:      {missing_img}")
     print(f"Missing metadata:    {missing_meta}")
+    print(f"Failed validation:   {bad_img}")
     print(f"Shards:              {len(shard_list)}")
     print(f"Total size:          {total_bytes / 1e9:.2f} GB")
     print(f"Output dir:          {out_dir}")
@@ -368,6 +379,11 @@ def main():
         help="Skip packaging; upload existing shards from --out-dir.",
     )
     ap.add_argument(
+        "--skip-validate",
+        action="store_true",
+        help="Skip strict image validation during packaging (not recommended).",
+    )
+    ap.add_argument(
         "--image-dir", type=str, default=None,
         help="image_dir path on the Lambda instance (used in shard_manifest.json). "
              "Default: /home/ubuntu/train_data_pilot or /home/ubuntu/train_data.",
@@ -395,7 +411,7 @@ def main():
     if not args.upload_only:
         if not manifest_path.exists():
             sys.exit(f"ERROR: manifest not found: {manifest_path}\nRun build_dataset.py first.")
-        package(manifest_path, out_dir, args.shard_size_gb, image_dir)
+        package(manifest_path, out_dir, args.shard_size_gb, image_dir, validate=not args.skip_validate)
 
     if not args.no_upload:
         upload_to_r2(out_dir, r2_prefix)

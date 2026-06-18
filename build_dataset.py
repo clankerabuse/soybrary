@@ -33,10 +33,7 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-try:
-    from PIL import Image
-except ImportError:
-    Image = None
+from image_validate import check_image_path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -85,17 +82,8 @@ def build_caption(meta):
 
 
 def image_is_readable(path: Path) -> bool:
-    """Return False for truncated/corrupt images that would crash sd-scripts."""
-    if Image is None:
-        sys.exit("ERROR: Pillow required for --validate-images. pip install Pillow")
-    try:
-        with Image.open(path) as img:
-            img.verify()
-        with Image.open(path) as img:
-            img.load()
-        return True
-    except Exception:
-        return False
+    """Return False for images that would crash sd-scripts latent caching."""
+    return check_image_path(path).ok
 
 
 def index_images():
@@ -202,9 +190,9 @@ def main():
     ap.add_argument(
         "--validate-images",
         action="store_true",
-        help="Open each image with Pillow and drop corrupt/truncated files. "
-        "Slower locally but prevents sd-scripts crashes on Lambda. "
-        "Recommended before package_dataset.py.",
+        help="Open each image with strict training-path validation and drop "
+        "corrupt/truncated files. Slower locally but prevents sd-scripts "
+        "crashes on Lambda. Recommended before package_dataset.py.",
     )
     args = ap.parse_args()
 

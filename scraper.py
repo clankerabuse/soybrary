@@ -10,7 +10,7 @@ import datetime
 import threading
 import traceback
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageOps
 import subprocess
 import tempfile
 import shutil
@@ -232,20 +232,26 @@ def verify_and_sanitize_image(file_data: bytes, mime_type: str, ext: str) -> byt
     if not validate_magic_bytes(file_data, mime_type, ext):
         raise ValueError(f"Magic bytes signature mismatch for {mime_type} / .{ext}")
         
-    # 2. Image structure verification (Pillow)
+    # 2. Image structure verification (Pillow + training-path checks)
     if mime_type in ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif']:
         try:
-            img = Image.open(io.BytesIO(file_data))
-            img.verify()
-            
+            from image_validate import check_image_bytes
+
+            result = check_image_bytes(file_data, ext)
+            if not result.ok:
+                raise ValueError(
+                    f"Image validation failed ({result.reason}): {result.detail}"
+                )
+
             # 3. Optional Sanitization (Strip metadata by re-encoding)
             if config["sanitize_images"] and mime_type in ['image/png', 'image/jpeg', 'image/jpg', 'image/webp']:
-                # Re-open because verify() closes the stream and prohibits saving
                 img = Image.open(io.BytesIO(file_data))
                 out_buf = io.BytesIO()
-                # Saving without original EXIF/metadata
-                img.save(out_buf, format=img.format)
+                img = ImageOps.exif_transpose(img).convert("RGB")
+                img.save(out_buf, format=img.format or "PNG")
                 return out_buf.getvalue()
+        except ValueError:
+            raise
         except Exception as e:
             raise ValueError(f"Pillow verification failed: {e}")
             

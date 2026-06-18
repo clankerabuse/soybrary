@@ -26,6 +26,8 @@ The goal is to train an **SDXL LoRA** on the ~124K usable static images so it ca
 
 ```
 build_dataset.py        # Phase 1: filter DB, build captions, emit JSONL manifest
+validate_images.py      # Pre-upload scan: strict image validation + quarantine
+image_validate.py       # Shared validation logic (local + Lambda prune)
 package_dataset.py      # Phase 2: tar shards (images + baked-in .txt captions) → upload to R2
 r2_sync.py              # R2 upload/download helper (boto3, checksum workaround)
 requirements.txt        # Updated with boto3/botocore/python-dotenv pins
@@ -174,7 +176,7 @@ nvidia-smi -q | grep -A2 "Fabric$"
 7. **Silent CPU fallback** — Lambda host can boot without NVIDIA driver. Fixed: `setup_lambda.sh` installs driver if missing and both scripts assert `torch.cuda.is_available()` before proceeding.
 8. **`Python.h` missing / Triton compile fail** — Triton JIT needs `python3.10-dev` + `build-essential`. Now installed by `setup_lambda.sh`.
 9. **Lambda Stack 2× H100 SXM — Fabric State stuck "In Progress" / CUDA error 802** — Driver/FM version mismatch in Lambda Stack image. FM reports "Pre-NVL5 / Nothing to do" and exits; GPUs never leave In Progress. Not fixable by reboot or FM config. Fix: use plain Ubuntu 22.04 instead.
-10. **Corrupt/truncated images crash training** — sd-scripts dies on bad files during latent caching (Pillow full decode). `prune_bad_images.py` fully decodes each image and also drops anything with longest side > 2048px (matches `max_bucket_reso`). Auto-run by `pull_data.sh` and `train_lora.sh`. Override with `MAX_LONG_SIDE=0`. Rebuild manifests with `build_dataset.py --validate-images` before re-packaging shards.
+10. **Corrupt/truncated images crash training** — sd-scripts dies on bad files during latent caching. Validation now runs the full training load path (EXIF transpose, RGB convert, bucket downscale, pixel read, re-encode), not just Pillow verify(). Use `validate_images.py` locally before packaging; `build_dataset.py --validate-images` excludes bad files from the manifest; `package_dataset.py` re-checks by default; `prune_bad_images.py` is a last-resort safety net on Lambda. Override max size with `MAX_LONG_SIDE=0`. Rebuild manifests after quarantining bad files.
 
 ---
 
@@ -183,6 +185,12 @@ nvidia-smi -q | grep -A2 "Fabric$"
 ### Local — one-time / when manifest or images change
 ```bash
 cd /path/to/soybrary
+
+# Scan all local images before packaging (recommended after pulling data):
+.venv/bin/python validate_images.py --manifest data/manifests/dataset.jsonl --quarantine
+
+# Or scan every file under data/images/:
+.venv/bin/python validate_images.py --quarantine
 
 # Regenerate manifest (only if new images scraped since last run):
 .venv/bin/python build_dataset.py --validate-images
@@ -213,6 +221,7 @@ set KEY ~/.ssh/soyjak-training-new.pem
 
 ssh -i $KEY ubuntu@$IP 'mkdir -p ~/soybrary'
 scp -i $KEY /path/to/soybrary/r2_sync.py ubuntu@$IP:~/soybrary/
+scp -i $KEY /path/to/soybrary/image_validate.py ubuntu@$IP:~/soybrary/
 scp -i $KEY -r /path/to/soybrary/train ubuntu@$IP:~/soybrary/
 ```
 
@@ -224,6 +233,7 @@ KEY=~/.ssh/soyjak-training-new.pem
 
 ssh -i $KEY ubuntu@$IP 'mkdir -p ~/soybrary'
 scp -i $KEY /path/to/soybrary/r2_sync.py ubuntu@$IP:~/soybrary/
+scp -i $KEY /path/to/soybrary/image_validate.py ubuntu@$IP:~/soybrary/
 scp -i $KEY -r /path/to/soybrary/train ubuntu@$IP:~/soybrary/
 ```
 

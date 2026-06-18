@@ -2,43 +2,28 @@
 """
 Remove bad images (and their .txt caption sidecars) from a DreamBooth image_dir.
 
-Drops:
-  - corrupt/truncated files (full Pillow decode, same as latent caching)
-  - images whose longest side exceeds --max-long-side (default 2048, matches
-    max_bucket_reso in train_lora.sh — huge sources waste cache time for no gain)
+Drops files that would crash kohya sd-scripts latent caching:
+  - corrupt/truncated files
+  - images that fail RGB convert / EXIF transpose / bucket resize
+  - images whose longest side exceeds --max-long-side (default 2048)
 
 Usage:
     python train/prune_bad_images.py /home/ubuntu/train_data
     python train/prune_bad_images.py /home/ubuntu/train_data --dry-run
-    python train/prune_bad_images.py /home/ubuntu/train_data --max-long-side 0  # disable size cap
+    python train/prune_bad_images.py /home/ubuntu/train_data --max-long-side 0
 """
 import argparse
 import sys
 from pathlib import Path
 
-try:
-    from PIL import Image
-except ImportError:
-    sys.exit("ERROR: Pillow not installed (should be in sd-venv from sd-scripts)")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
-
-
-def check_image(path: Path, max_long_side: int) -> str | None:
-    """
-    Return a drop reason ('corrupt', 'too_large') or None if the image is OK.
-    """
-    try:
-        with Image.open(path) as img:
-            img.verify()
-        with Image.open(path) as img:
-            w, h = img.size
-            if max_long_side > 0 and max(w, h) > max_long_side:
-                return "too_large"
-            img.load()
-        return None
-    except Exception:
-        return "corrupt"
+from image_validate import (  # noqa: E402
+    DEFAULT_MAX_LONG_SIDE,
+    IMAGE_EXTS,
+    check_image_path,
+)
 
 
 def latent_cache_paths(image_dir: Path, image_path: Path) -> list[Path]:
@@ -64,7 +49,7 @@ def main():
     ap.add_argument(
         "--max-long-side",
         type=int,
-        default=2048,
+        default=DEFAULT_MAX_LONG_SIDE,
         help="Drop images whose longest side exceeds this (default: 2048). "
         "Set 0 to keep all sizes.",
     )
@@ -86,22 +71,23 @@ def main():
     cap = f", max long side {args.max_long_side}px" if args.max_long_side > 0 else ""
     print(f"Scanning {len(images)} images in {image_dir}{cap}...", flush=True)
 
-    to_drop: dict[str, list[Path]] = {"corrupt": [], "too_large": []}
+    to_drop: dict[str, list[Path]] = {}
     for i, p in enumerate(images):
         if i and i % 20000 == 0:
             print(f"  checked {i}/{len(images)}...", flush=True)
-        reason = check_image(p, args.max_long_side)
-        if reason:
-            to_drop[reason].append(p)
+        result = check_image_path(p, max_long_side=args.max_long_side)
+        if not result.ok:
+            reason = result.reason or "bad"
+            to_drop.setdefault(reason, []).append(p)
 
-    for reason, paths in to_drop.items():
+    for reason, paths in sorted(to_drop.items()):
         print(f"{reason}: {len(paths)}", flush=True)
         for p in paths[:10]:
             print(f"  {p.name}")
         if len(paths) > 10:
             print(f"  ... and {len(paths) - 10} more")
 
-    all_bad = to_drop["corrupt"] + to_drop["too_large"]
+    all_bad = [p for paths in to_drop.values() for p in paths]
     if args.dry_run:
         return
 
@@ -112,7 +98,10 @@ def main():
         1 for p in image_dir.iterdir()
         if p.is_file() and p.suffix.lower() in IMAGE_EXTS
     )
-    print(f"Removed {len(all_bad)} image+caption pairs. {remaining} images remain.", flush=True)
+    print(
+        f"Removed {len(all_bad)} image+caption pairs. {remaining} images remain.",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

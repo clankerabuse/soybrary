@@ -111,39 +111,44 @@ class TestValidateMagicBytes(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestVerifyAndSanitizeImage(unittest.TestCase):
-    @patch("scraper.Image.open")
-    def test_valid_image_passes(self, mock_open):
-        mock_img = MagicMock()
-        mock_open.return_value = mock_img
+    @patch("image_validate.check_image_bytes")
+    def test_valid_image_passes(self, mock_check):
+        from image_validate import ImageCheckResult
 
+        mock_check.return_value = ImageCheckResult(True)
         data = _make_png()
         result = scraper.verify_and_sanitize_image(data, "image/png", "png")
         self.assertEqual(result, data)
-        mock_img.verify.assert_called_once()
 
     def test_magic_bytes_mismatch_raises(self):
         with self.assertRaises(ValueError) as ctx:
             scraper.verify_and_sanitize_image(b"bad", "image/png", "png")
         self.assertIn("Magic bytes signature mismatch", str(ctx.exception))
 
-    @patch("scraper.Image.open")
-    def test_pillow_verify_failure_raises(self, mock_open):
-        mock_img = MagicMock()
-        mock_img.verify.side_effect = Exception("corrupt")
-        mock_open.return_value = mock_img
+    @patch("image_validate.check_image_bytes")
+    def test_validation_failure_raises(self, mock_check):
+        from image_validate import ImageCheckResult
 
+        mock_check.return_value = ImageCheckResult(False, "corrupt", "broken")
         with self.assertRaises(ValueError) as ctx:
             scraper.verify_and_sanitize_image(_make_png(), "image/png", "png")
-        self.assertIn("Pillow verification failed", str(ctx.exception))
+        self.assertIn("Image validation failed", str(ctx.exception))
 
+    @patch("scraper.ImageOps.exif_transpose")
     @patch("scraper.Image.open")
-    def test_sanitize_strips_metadata(self, mock_open):
+    @patch("image_validate.check_image_bytes")
+    def test_sanitize_strips_metadata(self, mock_check, mock_open, mock_exif):
+        from image_validate import ImageCheckResult
+
+        mock_check.return_value = ImageCheckResult(True)
         orig = scraper.config["sanitize_images"]
         scraper.config["sanitize_images"] = True
         try:
             mock_img = MagicMock()
             mock_img.format = "PNG"
             mock_open.return_value = mock_img
+            mock_exif.return_value = mock_img
+            mock_img.convert.return_value = mock_img
 
             def fake_save(buf, format):
                 buf.write(b"clean")
@@ -151,7 +156,6 @@ class TestVerifyAndSanitizeImage(unittest.TestCase):
 
             result = scraper.verify_and_sanitize_image(_make_png(), "image/png", "png")
             self.assertEqual(result, b"clean")
-            self.assertEqual(mock_open.call_count, 2)
         finally:
             scraper.config["sanitize_images"] = orig
 

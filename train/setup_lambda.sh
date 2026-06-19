@@ -8,14 +8,11 @@
 #
 #   bash train/setup_lambda.sh
 #
-# Multi-GPU: the generated accelerate config auto-detects the number of visible
-# GPUs (nvidia-smi) and configures DDP (MULTI_GPU) when >1 is present. On a
-# 2× H100 box this trains both GPUs out of the box; on a single GPU it falls
-# back to distributed_type NO. Override with NUM_GPUS=N if needed.
+# Multi-GPU: override NUM_GPUS if you deliberately want DDP. Defaults to 1× A100
+# (single-GPU, no fabric/NVLink issues on Lambda).
 #
 # Pinned, verified versions (see train/requirements-lock.txt):
 #   Python 3.10, torch 2.6.0 + cu124, sd-scripts tag v0.10.6
-#   (cu124 supports Hopper/H100 — no change needed vs A100.)
 set -euo pipefail
 
 SDSCRIPTS_TAG="v0.10.6"          # stable release BEFORE the v0.11.0 refactor
@@ -68,8 +65,7 @@ if [ "$NUM_GPUS_CHECK" -gt 1 ]; then
   fi
   echo "==> Multi-GPU fabric state OK ($NUM_GPUS_CHECK GPUs)"
 elif [ "$NUM_GPUS_CHECK" -eq 1 ]; then
-  echo "WARNING: only 1 GPU visible — this project is tuned for 2× H100 (effective batch 16)." >&2
-  echo "         Full runs on 1× GPU work but take ~4-6× longer. Prefer 2× H100 SXM 80GB." >&2
+  echo "==> Single GPU detected — project target (1× A100 40GB)"
 fi
 
 # --- Python 3.10 venv -------------------------------------------------------
@@ -106,11 +102,9 @@ cd "$WORKDIR"
 echo "==> Installing R2 sync deps"
 pip install "boto3>=1.34.0,<1.36.0" "botocore>=1.34.0,<1.36.0" python-dotenv huggingface_hub
 
-# --- accelerate config (non-interactive, auto multi-GPU, bf16) --------------
-# Detect visible GPUs so a 2× H100 box trains with DDP automatically. Override
-# with NUM_GPUS=N (e.g. NUM_GPUS=1 to force single-GPU on a multi-GPU host).
-NUM_GPUS="${NUM_GPUS:-$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)}"
-[ "$NUM_GPUS" -ge 1 ] 2>/dev/null || NUM_GPUS=1
+# --- accelerate config (non-interactive, single-GPU default, bf16) ----------
+# Default NUM_GPUS=1 for 1× A100 stability. Override with NUM_GPUS=2+ for DDP.
+NUM_GPUS="${NUM_GPUS:-1}"
 if [ "$NUM_GPUS" -gt 1 ]; then
   DISTRIBUTED_TYPE="MULTI_GPU"
 else

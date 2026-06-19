@@ -5,13 +5,13 @@
 # (env, data transfer, captions, the model actually learning distinct variants)
 # cheaply before committing to the full ~124k run.
 #
-# Tuned for 2× H100 80GB (DDP). Effective batch = 8 (per GPU) × 2 = 16.
+# Tuned for 1× A100 40GB. Effective batch = 4 × gradient_accumulation_steps 4 = 16.
 # Step math: ~10,000 images / effective batch 16 = ~625 steps per epoch.
 # max_train_steps = 2000 is ~3 epochs: enough to see variants emerge in samples
-# without burning many GPU-hours. Expect roughly 30-60 min on 2× H100.
+# without burning many GPU-hours. Expect roughly 1-2 hrs on 1× A100.
 #
-# IMPORTANT: train_batch_size is PER GPU and must match BATCH_SIZE in
-# train_lora.sh. The full run uses train/config.toml instead.
+# IMPORTANT: train_batch_size and gradient_accumulation_steps must match
+# BATCH_SIZE / GRAD_ACCUM_STEPS in train_lora.sh. Full run uses config.toml.
 
 # --- base model ---
 pretrained_model_name_or_path = "/home/ubuntu/models/sd_xl_base_1.0_fixvae_fp16.safetensors"
@@ -31,7 +31,7 @@ network_module = "networks.lora"
 network_dim = 32
 network_alpha = 16
 
-# --- precision / memory (2× H100 80GB) ---
+# --- precision / memory (1× A100 40GB) ---
 mixed_precision = "bf16"
 full_bf16 = true
 gradient_checkpointing = true
@@ -50,8 +50,8 @@ text_encoder_lr = 7.5e-5
 lr_scheduler = "cosine_with_restarts"
 lr_warmup_steps = 60            # ~3% of max_train_steps
 max_train_steps = 2000          # ~3 epochs over 10k images at effective batch 16
-train_batch_size = 8            # PER GPU; must match BATCH_SIZE in train_lora.sh
-gradient_accumulation_steps = 1
+train_batch_size = 4            # must match BATCH_SIZE in train_lora.sh
+gradient_accumulation_steps = 4   # effective batch 16; must match GRAD_ACCUM_STEPS
 max_grad_norm = 1.0
 seed = 42
 

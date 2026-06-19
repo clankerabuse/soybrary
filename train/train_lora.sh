@@ -14,13 +14,13 @@ SDSCRIPTS_DIR="${SDSCRIPTS_DIR:-$WORKDIR/sd-scripts}"
 MODEL="/home/ubuntu/models/sd_xl_base_1.0_fixvae_fp16.safetensors"
 
 # --- GPU count + per-GPU batch size -----------------------------------------
-# NUM_GPUS drives accelerate --num_processes (DDP across GPUs). BATCH_SIZE is the
-# PER-GPU batch and must match train_batch_size in the chosen config_*.toml.
-# Effective batch = BATCH_SIZE * NUM_GPUS. Defaults tuned for 2× H100 80GB
-# (per-GPU 8 → effective 16). Override either via env if your box differs.
-NUM_GPUS="${NUM_GPUS:-$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)}"
-[ "$NUM_GPUS" -ge 1 ] 2>/dev/null || NUM_GPUS=1
-BATCH_SIZE="${BATCH_SIZE:-8}"
+# Defaults target 1× A100 40GB (stable, no multi-GPU fabric headaches).
+# BATCH_SIZE is per-GPU and must match train_batch_size in config_*.toml.
+# Effective batch = BATCH_SIZE × GRAD_ACCUM_STEPS (not × NUM_GPUS).
+# Override NUM_GPUS only if you deliberately want multi-GPU DDP.
+NUM_GPUS="${NUM_GPUS:-1}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-4}"
 
 MODE="${MODE:-pilot}"
 if [ "$MODE" = "pilot" ]; then
@@ -82,15 +82,30 @@ fi
 [ -f "$CONFIG" ] || { echo "ERROR: train config not found: $CONFIG" >&2; exit 1; }
 [ -d "$TRAIN_DATA" ] || { echo "ERROR: TRAIN_DATA not found: $TRAIN_DATA — run pull_data.sh first" >&2; exit 1; }
 
-if [ "$NUM_GPUS" -eq 1 ]; then
-    echo "WARNING: 1 GPU detected — configs assume 2× H100 (effective batch 16)." >&2
-    echo "         Expect ~4-6× longer latent caching + training vs 2× H100." >&2
+if [ "$NUM_GPUS" -gt 1 ]; then
+    echo "WARNING: NUM_GPUS=$NUM_GPUS — multi-GPU DDP enabled. Project defaults to 1× A100." >&2
+fi
+
+# --- Optional fast bad-image scan (parallel, no deletes) ----------------------
+if [ "${CHECK_IMAGES:-1}" = "1" ]; then
+    echo "==> Checking images in $TRAIN_DATA (parallel scan, no deletes)"
+    python "$REPO_DIR/train/check_images.py" "$TRAIN_DATA" \
+        --max-long-side "${MAX_LONG_SIDE:-2048}" \
+        --workers "${CHECK_WORKERS:-$(nproc)}" || true
 fi
 
 # --- Prune corrupt / oversized images (idempotent; fast when data is clean) -
 MAX_LONG_SIDE="${MAX_LONG_SIDE:-2048}"
 echo "==> Pruning bad images in $TRAIN_DATA (max long side ${MAX_LONG_SIDE}px)"
 python "$REPO_DIR/train/prune_bad_images.py" "$TRAIN_DATA" --max-long-side "$MAX_LONG_SIDE"
+
+if [ "${CHECK_IMAGES:-1}" = "1" ]; then
+    echo "==> Verifying image dir is clean before training"
+    python "$REPO_DIR/train/check_images.py" "$TRAIN_DATA" \
+        --max-long-side "$MAX_LONG_SIDE" \
+        --workers "${CHECK_WORKERS:-$(nproc)}" \
+        --fail
+fi
 
 # --- Fail-fast: never silently train on CPU --------------------------------
 # accelerate will quietly fall back to CPU if the NVIDIA driver is missing,
@@ -109,7 +124,8 @@ echo "    train config:    $CONFIG"
 echo "    dataset config:  $DATASET_CONFIG"
 echo "    image_dir:       $TRAIN_DATA"
 echo "    GPUs:            $NUM_GPUS"
-echo "    per-GPU batch:   $BATCH_SIZE  (effective batch = $((BATCH_SIZE * NUM_GPUS)))"
+echo "    per-GPU batch:   $BATCH_SIZE"
+echo "    grad accum:      $GRAD_ACCUM_STEPS  (effective batch = $((BATCH_SIZE * GRAD_ACCUM_STEPS * NUM_GPUS)))"
 
 # --num_processes is passed explicitly so the launch is correct even if the
 # cached accelerate default_config.yaml is stale. With NUM_GPUS>1 this runs DDP.

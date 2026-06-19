@@ -6,7 +6,7 @@
 #
 # TARGET ENVIRONMENT
 #   Python:      3.10.x        (sd-scripts is tested on 3.10; 3.11/3.12 untested)
-#   GPU:         2× NVIDIA H100 80GB SXM (Lambda Labs gpu_2x_h100_sxm5)
+#   GPU:         1× NVIDIA A100 40GB SXM (Lambda Labs gpu_1x_a100_sxm4)
 #   CUDA:        12.4
 #   sd-scripts:  git tag v0.10.6  (stable release BEFORE the v0.11.0 refactor)
 #
@@ -22,9 +22,9 @@
 #   cd sd-scripts && git checkout v0.10.6
 #   pip install --use-pep517 -r requirements.txt
 #
-# `accelerate config` is written automatically by setup_lambda.sh. For 2× H100:
-#   - distributed_type: MULTI_GPU
-#   - num_processes: 2
+# `accelerate config` is written automatically by setup_lambda.sh. For 1× A100:
+#   - distributed_type: NO
+#   - num_processes: 1
 #   - mixed_precision: bf16
 # ============================================================================
 

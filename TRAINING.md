@@ -3,12 +3,12 @@
 ## What this project is
 
 **Soybrary** is a local scraper + web UI for soybooru.com. It has scraped ~167K posts into:
-- `data/images/` — 156,570 image files (`{id}.{ext}`)
+- `data/images/` — 136,950 image files after quarantine (`{id}.{ext}`; was 156,394 on disk before June 2026 validation)
 - `data/metadata/` — 167,071 JSON files (`{id}.json`) with tags, variants, subvariants
 - `data/soybooru.db` — SQLite index of all posts
 - These are also mirrored on **Cloudflare R2** (`soyjak-training` bucket) under `images/` and `metadata/` (legacy individual files), and packaged as tar shards under `datasets/soyjak-sdxl-{full,pilot}/` for fast Lambda pulls
 
-The goal is to train an **SDXL LoRA** on the ~124K usable static images so it can generate soyjak variants on demand.
+The goal is to train an **SDXL LoRA** on the **~105K** strictly validated static images so it can generate soyjak variants on demand.
 
 ## Key design decisions (already made, don't revisit)
 
@@ -44,37 +44,66 @@ train/
   check_images.py       # Parallel bad-image scan (check-only; auto-run before training)
   check_images.sh       # Wrapper: MODE=pilot|full, uses sd-venv Python
   config_pilot.toml     # Pilot run config: 2000 steps (~3 epochs over 10K images at eff. batch 16)
-  config.toml           # Full run config: 12000 steps (~1.5 epochs over 124K images at eff. batch 16)
+  config.toml           # Full run config: 12000 steps (~1.8 epochs over 105K images at eff. batch 16)
   sample_prompts.txt    # Sample prompts for mid-training previews (tests variant separation)
   requirements-lock.txt # Pinned versions with rationale
 
 data/manifests/         # gitignored (lives under data/ which is gitignored)
-  dataset.jsonl         # Full manifest: 123,778 images (also on R2: manifests/dataset.jsonl)
+  dataset.jsonl         # Full manifest: 105,495 images (also on R2: manifests/dataset.jsonl)
   dataset.stats.json    # Stats for full manifest
   dataset_pilot10k.jsonl # Pilot manifest: 10,000 stratified images (on R2: manifests/dataset_pilot10k.jsonl)
+  bad_images.json       # Report from validate_images.py (quarantined files + reasons)
+
+data/quarantine/images/ # Bad local files moved aside by validate_images.py --quarantine
 ```
 
 ## Dataset stats
 
 - **Total DB posts:** 242,837
 - **Completed static images (PNG/JPEG/WebP):** 149,614
-- **After short-side ≥512px filter:** 123,778 images (~80GB)
+- **After strict validation + filters:** **105,495 images** in `dataset.jsonl` (packaged as **9 shards, 38.2 GB** on R2)
 - **Pilot subset:** 10,000 images, stratified across 3,047 distinct variants (~10 per variant, seed=42)
-- **Top variants:** chudjak (22K), gapejak (16K), markiplier_soyjak (15K), soyak (14K), cobson (14K)
+- **Top variants (current manifest):** soyak (11K), chudjak (9.6K), gapejak (8.6K), bernd (8.1K), markiplier_soyjak (7.7K)
+
+### Validation funnel (June 2026 full rebuild)
+
+| Stage | Count | Notes |
+|---|---|---|
+| Files on disk (pre-scan) | 156,394 | Flat `data/images/` |
+| Quarantined by `validate_images.py` | 19,620 | Moved to `data/quarantine/images/` |
+| Remaining on disk | 136,950 | |
+| DB candidates (`completed` static) | 149,614 | |
+| **Kept in manifest** | **105,495** | `build_dataset.py --validate-images` |
+
+**Why files were excluded:**
+
+| Reason | Count | What it means |
+|---|---|---|
+| `below_min_resolution` | 24,447 | Short side &lt; 512px (thumbnails / reaction pics) |
+| `missing_image_file` | 19,581 | Quarantined or never downloaded |
+| `too_large` (quarantine) | 13,043 | Long side &gt; 2048px |
+| `bad_magic` (quarantine) | 6,576 | Wrong extension — mostly `.jpg` files that are actually PNG |
+| `corrupt` | 1 | Truncated JPEG (`214663.jpg`) — the latent-cache crash type |
+| `corrupt_image` (manifest build) | 46 | Failed strict re-check during manifest build |
+| `missing_dimensions` | 40 | Metadata JSON missing width/height |
+| `above_max_resolution` | 5 | Metadata says &gt;2048px but file wasn't quarantined |
+
+Validation is stricter than Pillow `verify()` alone: `image_validate.py` runs EXIF transpose, RGB convert, bucket downscale, full pixel read, and PNG re-encode — the same load path sd-scripts uses before VAE encode.
 
 ## R2 bucket structure (`soyjak-training`)
 
 ```
 images/{id}.{ext}                       # all scraped images (~156K files, legacy individual files)
 metadata/{id}.json                      # all metadata JSONs (~167K files, legacy)
-manifests/dataset.jsonl                 # full 124K manifest
+manifests/dataset.jsonl                 # full 105K manifest
 manifests/dataset_pilot10k.jsonl        # pilot 10K manifest
 
 datasets/soyjak-sdxl-full/             # packaged full dataset (from package_dataset.py)
-  shard_manifest.json                  #   shard list + sha256 + counts
+  shard_manifest.json                  #   shard list + sha256 + counts (9 shards, 38.2 GB)
   shards/shard_0000.tar                #   flat tar: {id}.{ext} + {id}.txt per image
   shards/shard_0001.tar
   ...
+  shards/shard_0008.tar
 
 datasets/soyjak-sdxl-pilot/            # packaged pilot dataset
   shard_manifest.json
@@ -92,10 +121,10 @@ All train/ scripts accept `MODE=pilot` (default) or `MODE=full`:
 | | Pilot | Full |
 |---|---|---|
 | Manifest | `dataset_pilot10k.jsonl` | `dataset.jsonl` |
-| Images | 10,000 | 123,778 |
+| Images | 10,000 | 105,495 |
 | image_dir on Lambda | `/home/ubuntu/train_data_pilot` | `/home/ubuntu/train_data` |
 | Train config | `config_pilot.toml` | `config.toml` |
-| Steps (1×A100, eff. batch 16) | 2,000 (~3 epochs) | 12,000 (~1.5 epochs) |
+| Steps (1×A100, eff. batch 16) | 2,000 (~3 epochs) | 12,000 (~1.8 epochs) |
 | R2 model prefix | `models/soyjak-lora-sdxl-pilot` | `models/soyjak-lora-sdxl` |
 | Expected time (1×A100) | ~1-2 hrs | ~20-30 hrs total |
 
@@ -105,7 +134,7 @@ All train/ scripts accept `MODE=pilot` (default) or `MODE=full`:
 |---|---|---|
 | Data pull | 30–60 min | Network-bound; same on any GPU |
 | Bad-image check + prune | 10–30 min | Parallel scan + delete; run `check_images.sh` anytime |
-| Latent cache | 6–10 hrs | Single-GPU VAE encode + disk write; ~124k images |
+| Latent cache | 5–8 hrs | Single-GPU VAE encode + disk write; ~105k images |
 | Training (12k steps) | 12–18 hrs | batch 4 × grad accum 4, effective batch 16 |
 | **Total** | **~20–30 hrs** | Slow but stable — run in tmux, detach, come back |
 
@@ -122,7 +151,7 @@ multi-GPU hosts have been unreliable enough to waste balance on restarts.
 1. Instance type: **gpu_1x_a100_sxm4** (or equivalent 1× A100 40GB)
 2. Image: **Ubuntu 22.04** (plain — not Lambda Stack)
 3. SSH key: `soyjak-training-new`
-4. Disk: ≥ 200 GB (images ~80 GB + latent cache ~40 GB + checkpoints + headroom)
+4. Disk: ≥ 150 GB (images ~38 GB + latent cache ~35 GB + checkpoints + headroom)
 
 After launching, sanity-check **before** running setup:
 
@@ -136,7 +165,7 @@ nvidia-smi -L   # expect: GPU 0: NVIDIA A100-SXM4-40GB
 |---|---|---|
 | `train_batch_size` | 4 | per step; fits 40 GB VRAM with grad checkpoint |
 | `gradient_accumulation_steps` | 4 | effective batch = 16 |
-| `max_train_steps` | 12,000 | ~1.5 epochs over 123,778 images |
+| `max_train_steps` | 12,000 | ~1.8 epochs over 105,495 images |
 | `learning_rate` / `unet_lr` | 1.5e-4 | unchanged from 2× H100 recipe (same eff. batch) |
 | `text_encoder_lr` | 7.5e-5 | scaled proportionally |
 | `lr_warmup_steps` | 240 | ~2% of max_train_steps |
@@ -168,6 +197,15 @@ nvidia-smi -L   # expect: GPU 0: NVIDIA A100-SXM4-40GB
 - Decision: re-center project on 1× A100 40GB — slower but avoids multi-GPU instability burning balance
 - Config: batch 4 + grad accum 4 (effective batch 16 preserved), `NUM_GPUS=1` default
 
+### Session 5 — Full dataset rebuild + R2 re-upload (June 19–20 2026)
+- Emptied R2 bucket and rebuilt the full dataset from scratch with strict validation
+- `validate_images.py --quarantine` on all 156,394 local files → 19,620 quarantined, 136,950 remain
+- `build_dataset.py --validate-images` → **105,495** images in manifest (was 123,778 before strict pipeline)
+- `package_dataset.py --mode full` → 9 shards, 38.21 GB, **0 failed validation** during packaging
+- Uploaded to `datasets/soyjak-sdxl-full/` + `manifests/dataset.jsonl`
+- Cleaned up 7 stale shards (`shard_0009`–`shard_0015`) left over from an earlier packaging run in `data/package/full/shards/` — `upload_to_r2` uploads every `*.tar` in that dir, but `pull_data.sh` only downloads shards listed in `shard_manifest.json`
+- **Next:** launch fresh 1× A100 instance → `pull_data.sh` → `train_lora.sh`
+
 ## Known issues and fixes
 
 1. **`vae = ""`** in config causes crash — sd-scripts treats it as an empty HF repo. Key must be omitted entirely.
@@ -179,7 +217,8 @@ nvidia-smi -L   # expect: GPU 0: NVIDIA A100-SXM4-40GB
 7. **Silent CPU fallback** — Lambda host can boot without NVIDIA driver. Fixed: `setup_lambda.sh` installs driver if missing and both scripts assert `torch.cuda.is_available()` before proceeding.
 8. **`Python.h` missing / Triton compile fail** — Triton JIT needs `python3.10-dev` + `build-essential`. Now installed by `setup_lambda.sh`.
 9. **Lambda Stack 2× H100 SXM — Fabric State stuck "In Progress" / CUDA error 802** — Driver/FM version mismatch in Lambda Stack image. FM reports "Pre-NVL5 / Nothing to do" and exits; GPUs never leave In Progress. Not fixable by reboot or FM config. Fix: use plain Ubuntu 22.04 instead.
-10. **Corrupt/truncated images crash training** — sd-scripts dies on bad files during latent caching. Validation now runs the full training load path (EXIF transpose, RGB convert, bucket downscale, pixel read, re-encode), not just Pillow verify(). Use `validate_images.py` locally before packaging; `build_dataset.py --validate-images` excludes bad files from the manifest; `package_dataset.py` re-checks by default; `prune_bad_images.py` is a last-resort safety net on Lambda. `check_images.py` runs a parallel pre-flight scan and a post-prune `--fail` verify before training starts. Override max size with `MAX_LONG_SIDE=0` or `CHECK_IMAGES=0`. Rebuild manifests after quarantining bad files.
+10. **Corrupt/truncated images crash training** — sd-scripts dies on bad files during latent caching. Validation now runs the full training load path (EXIF transpose, RGB convert, bucket downscale, pixel read, re-encode), not just Pillow `verify()`. Use `validate_images.py` locally before packaging; `build_dataset.py --validate-images` excludes bad files from the manifest; `package_dataset.py` re-checks by default; `prune_bad_images.py` is a last-resort safety net on Lambda. `check_images.py` runs a parallel pre-flight scan and a post-prune `--fail` verify before training starts. Override max size with `MAX_LONG_SIDE=0` or `CHECK_IMAGES=0`. Rebuild manifests after quarantining bad files.
+11. **Stale shards uploaded to R2** — `package_dataset.py` writes new shards into `data/package/full/shards/` but does not delete old `shard_*.tar` files. `upload_to_r2` then uploads every `*.tar` in that directory. `pull_data.sh` is safe (it reads `shard_manifest.json`), but stale shards waste R2 storage. **Fix:** before re-packaging, `rm data/package/full/shards/shard_*.tar` (or delete orphans manually). To remove stale objects from R2 after the fact, delete keys under `datasets/soyjak-sdxl-full/shards/` that are not listed in `shard_manifest.json`.
 
 ---
 
@@ -189,19 +228,22 @@ nvidia-smi -L   # expect: GPU 0: NVIDIA A100-SXM4-40GB
 ```bash
 cd /path/to/soybrary
 
-# Scan all local images before packaging (recommended after pulling data):
-.venv/bin/python validate_images.py --manifest data/manifests/dataset.jsonl --quarantine
+# Recommended full rebuild flow (June 2026):
 
-# Or scan every file under data/images/:
-.venv/bin/python validate_images.py --quarantine
+# 1. Scan ALL local images, quarantine bad ones (~20 min for 156K images):
+.venv/bin/python validate_images.py --quarantine --fail-on-bad
+# Report: data/manifests/bad_images.json
 
-# Regenerate manifest (only if new images scraped since last run):
+# 2. Rebuild manifest with strict per-file validation (~2.5 hrs):
 .venv/bin/python build_dataset.py --validate-images
 
-# Re-upload manifest to R2:
+# 3. Upload manifest to R2:
 .venv/bin/python r2_sync.py upload-file --src data/manifests/dataset.jsonl --key manifests/dataset.jsonl
 
-# Package images+captions into tar shards and upload to R2 (full run, ~80 GB):
+# 4. Clear old shards before re-packaging (avoids uploading stale shard_*.tar to R2):
+rm -f data/package/full/shards/shard_*.tar
+
+# 5. Package + upload (full run, ~38 GB / 9 shards; ~2.5 hrs pack + ~30 min upload):
 .venv/bin/python package_dataset.py --mode full
 
 # Package pilot subset only (~10 GB):
@@ -212,6 +254,9 @@ cd /path/to/soybrary
 
 # Upload already-packaged shards (skip re-packaging):
 .venv/bin/python package_dataset.py --mode full --upload-only
+
+# Optional: scan only manifest-listed files (faster if you trust the dir):
+.venv/bin/python validate_images.py --manifest data/manifests/dataset.jsonl --quarantine
 ```
 
 ### Local — copy scripts to a new instance

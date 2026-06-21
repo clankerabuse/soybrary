@@ -76,3 +76,8 @@ venv.bak/
 # Project specific ignores
 session.json
 data/
+hf_upload/
+full_lora/
+pilot_lora/
+hf_space/*.safetensors
+ubuntu@*

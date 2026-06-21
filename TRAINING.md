@@ -175,7 +175,7 @@ nvidia-smi -L   # expect: GPU 0: NVIDIA A100-SXM4-40GB
 ## Session history
 
 ### Session 1 — Pilot run (June 13 2026)
-- Instance: Lambda Labs A100-SXM4-40GB at `<instance-ip>` (terminated)
+- Instance: Lambda Labs A100-SXM4-40GB (terminated)
 - SSH key: `~/.ssh/lambda-training.pem` (retired)
 - Result: **COMPLETE.** 9,994 images, 7,500 steps (~3 epochs), ~3 hrs total
 - Samples: `~/Downloads/soyjak-samples/sample/soyjak-lora-sdxl-pilot_*.png`
@@ -183,13 +183,13 @@ nvidia-smi -L   # expect: GPU 0: NVIDIA A100-SXM4-40GB
 
 ### Session 2 — Full run setup (June 15 2026)
 - SSH key: `~/.ssh/soyjak-training-new.pem` (key pair: `soyjak-training-new`)
-- Lambda API key: `...` (in `.env` as `LAMBDA_API_KEY`)
+- Lambda API key: set in `.env` as `LAMBDA_API_KEY` (never commit)
 - Discovered: Lambda Stack 22.04 broken on 2× H100 SXM (Fabric State stuck In Progress)
 - Fix: plain Ubuntu 22.04 + manual driver install → fabric reaches Completed
-- Instance: `<instance-ip>` — full run in progress
+- Instance: 1× A100 — full run in progress
 
 ### Session 3 — Full run on 1× A100 (June 17 2026, abandoned)
-- Instance: Lambda Labs 1× A100 at `<instance-ip>` — switched to 2× H100 after slow latent cache
+- Instance: Lambda Labs 1× A100 — switched to 2× H100 after slow latent cache
 - Issue: corrupt JPEG in shards crashed first train attempt; 2× H100 path then kept failing on fabric/CUDA
 - Fix: `prune_bad_images.py` + `check_images.py` added
 
@@ -268,9 +268,9 @@ set IP <instance-ip>
 set KEY ~/.ssh/soyjak-training-new.pem
 
 ssh -i $KEY ubuntu@$IP 'mkdir -p ~/soybrary'
-scp -i $KEY /path/to/soybrary/r2_sync.py ubuntu@$IP:~/soybrary/
-scp -i $KEY /path/to/soybrary/image_validate.py ubuntu@$IP:~/soybrary/
-scp -i $KEY -r /path/to/soybrary/train ubuntu@$IP:~/soybrary/
+scp -i $KEY ./r2_sync.py ubuntu@$IP:~/soybrary/
+scp -i $KEY ./image_validate.py ubuntu@$IP:~/soybrary/
+scp -i $KEY -r ./train ubuntu@$IP:~/soybrary/
 ```
 
 Bash:
@@ -280,9 +280,9 @@ IP=<instance-ip>
 KEY=~/.ssh/soyjak-training-new.pem
 
 ssh -i $KEY ubuntu@$IP 'mkdir -p ~/soybrary'
-scp -i $KEY /path/to/soybrary/r2_sync.py ubuntu@$IP:~/soybrary/
-scp -i $KEY /path/to/soybrary/image_validate.py ubuntu@$IP:~/soybrary/
-scp -i $KEY -r /path/to/soybrary/train ubuntu@$IP:~/soybrary/
+scp -i $KEY ./r2_sync.py ubuntu@$IP:~/soybrary/
+scp -i $KEY ./image_validate.py ubuntu@$IP:~/soybrary/
+scp -i $KEY -r ./train ubuntu@$IP:~/soybrary/
 ```
 
 ### On the instance — sanity check first (before anything else)
@@ -299,7 +299,7 @@ export R2_ACCOUNT_ID="..."
 export R2_ACCESS_KEY_ID="..."
 export R2_SECRET_ACCESS_KEY="..."
 export R2_BUCKET_NAME="soyjak-training"
-export R2_ENDPOINT="https://....r2.cloudflarestorage.com"
+export R2_ENDPOINT="https://<account-id>.r2.cloudflarestorage.com"
 
 cd ~/soybrary
 bash train/setup_lambda.sh

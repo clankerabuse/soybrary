@@ -39,6 +39,9 @@ DATASET_CONFIG="/home/ubuntu/dataset_${MODE}.toml"
 
 mkdir -p /home/ubuntu/models /home/ubuntu/out /home/ubuntu/logs
 
+# kohya reads sample_prompts from an absolute path in config_*.toml
+cp "$REPO_DIR/train/sample_prompts.txt" /home/ubuntu/sample_prompts.txt
+
 # --- Generate dataset.toml pointing at the correct image_dir ----------------
 echo "==> Writing $DATASET_CONFIG (image_dir=$TRAIN_DATA)"
 cat > "$DATASET_CONFIG" <<TOML
@@ -95,9 +98,14 @@ if [ "${CHECK_IMAGES:-1}" = "1" ]; then
 fi
 
 # --- Prune corrupt / oversized images (idempotent; fast when data is clean) -
+# Set PRUNE_IMAGES=0 to skip when data was validated locally before packaging.
 MAX_LONG_SIDE="${MAX_LONG_SIDE:-2048}"
-echo "==> Pruning bad images in $TRAIN_DATA (max long side ${MAX_LONG_SIDE}px)"
-python "$REPO_DIR/train/prune_bad_images.py" "$TRAIN_DATA" --max-long-side "$MAX_LONG_SIDE"
+if [ "${PRUNE_IMAGES:-1}" = "1" ]; then
+    echo "==> Pruning bad images in $TRAIN_DATA (max long side ${MAX_LONG_SIDE}px)"
+    python "$REPO_DIR/train/prune_bad_images.py" "$TRAIN_DATA" --max-long-side "$MAX_LONG_SIDE"
+else
+    echo "==> Skipping prune (PRUNE_IMAGES=0)"
+fi
 
 if [ "${CHECK_IMAGES:-1}" = "1" ]; then
     echo "==> Verifying image dir is clean before training"

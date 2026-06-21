@@ -166,6 +166,16 @@ def check_image_path(
         data = path.read_bytes()
     except OSError as exc:
         return ImageCheckResult(False, "unreadable", str(exc))
+
+    # sd-scripts calls imagesize.get() on JPEG paths before Pillow load.
+    if path.suffix.lower() in {".jpg", ".jpeg"}:
+        try:
+            import imagesize
+
+            imagesize.get(str(path))
+        except Exception as exc:
+            return ImageCheckResult(False, "imagesize", str(exc))
+
     return check_image_bytes(
         data,
         path.suffix,

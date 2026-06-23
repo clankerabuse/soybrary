@@ -82,6 +82,22 @@ TRANSFER_CONFIG = TransferConfig(
 )
 
 
+def _safe_extract_tar(tf: tarfile.TarFile, dest: Path) -> None:
+    """Extract tar members under dest, rejecting path traversal (tar-slip)."""
+    dest = dest.resolve()
+    for member in tf.getmembers():
+        target = (dest / member.name).resolve()
+        try:
+            target.relative_to(dest)
+        except ValueError:
+            raise ValueError(f"unsafe tar member path: {member.name!r}") from None
+    if hasattr(tarfile, "data_filter"):
+        tf.extractall(path=dest, filter="data")
+    else:
+        for member in tf.getmembers():
+            tf.extract(member, path=dest, set_attrs=False)
+
+
 def get_env(name):
     val = os.environ.get(name)
     if not val:
@@ -331,7 +347,7 @@ def cmd_download_archive(args):
             print(f"  extracting into {dest}...", flush=True)
             t_ex = time.monotonic()
             with tarfile.open(tmp_path, "r") as tf:
-                tf.extractall(path=dest)
+                _safe_extract_tar(tf, dest)
             ex_elapsed = time.monotonic() - t_ex
             extracted_total += shard["images"]
             print(

@@ -11,6 +11,7 @@ import logging
 import subprocess
 import tempfile
 import os
+import re
 from typing import Optional
 
 from scraper import ScrapeJob
@@ -121,6 +122,20 @@ def get_db():
 
 
 VIDEO_EXTENSIONS = {'mp4', 'webm', 'mov', 'avi', 'mkv', 'ogv', 'ogg', 'flv', 'wmv'}
+_SAFE_EXT = re.compile(r"^[a-zA-Z0-9]+$")
+
+
+def _safe_media_path(base_dir: Path, post_id: int, extension: str) -> Optional[Path]:
+    """Resolve a media file under base_dir, rejecting path traversal via extension."""
+    if not extension or not _SAFE_EXT.match(extension):
+        return None
+    base = base_dir.resolve()
+    path = (base_dir / f"{post_id}.{extension}").resolve()
+    try:
+        path.relative_to(base)
+    except ValueError:
+        return None
+    return path
 
 
 def get_or_create_thumbnail(post_id: int, extension: str, mime_type: str = None):
@@ -135,8 +150,8 @@ def get_or_create_thumbnail(post_id: int, extension: str, mime_type: str = None)
     if is_video:
         return _thumbnail_from_video(post_id, extension, thumb_path)
 
-    img_path = IMAGES_DIR / f"{post_id}.{extension}"
-    if not img_path.exists():
+    img_path = _safe_media_path(IMAGES_DIR, post_id, extension or "")
+    if img_path is None or not img_path.exists():
         return None
 
     try:
@@ -153,8 +168,8 @@ def get_or_create_thumbnail(post_id: int, extension: str, mime_type: str = None)
 
 def _thumbnail_from_video(post_id: int, extension: str, thumb_path: Path):
     """Extract the first frame of a video as a JPEG thumbnail using ffmpeg."""
-    vid_path = VIDEOS_DIR / f"{post_id}.{extension}"
-    if not vid_path.exists():
+    vid_path = _safe_media_path(VIDEOS_DIR, post_id, extension or "")
+    if vid_path is None or not vid_path.exists():
         return None
 
     # Write to a temp file first, then move atomically so a failed extraction
@@ -236,16 +251,16 @@ def root():
 
 @app.get("/images/{post_id}.{extension}")
 def get_image(post_id: int, extension: str):
-    img_path = IMAGES_DIR / f"{post_id}.{extension}"
-    if not img_path.exists():
+    img_path = _safe_media_path(IMAGES_DIR, post_id, extension)
+    if img_path is None or not img_path.exists():
         raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(img_path)
 
 
 @app.get("/videos/{post_id}.{extension}")
 def get_video(post_id: int, extension: str):
-    video_path = VIDEOS_DIR / f"{post_id}.{extension}"
-    if not video_path.exists():
+    video_path = _safe_media_path(VIDEOS_DIR, post_id, extension)
+    if video_path is None or not video_path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
     return FileResponse(video_path)
 

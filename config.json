@@ -4,7 +4,7 @@
   "data_dir": "./data",
   "headful_session": true,
   "validate_images": true,
-  "sanitize_images": false,
+  "sanitize_images": true,
   "validate_videos": true,
   "sanitize_videos": false
 }

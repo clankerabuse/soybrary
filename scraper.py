@@ -26,7 +26,7 @@ DEFAULT_CONFIG = {
     "delay_ms": 2000,
     "data_dir": "./data",
     "validate_images": True,
-    "sanitize_images": False,
+    "sanitize_images": True,
     "validate_videos": True,
     "sanitize_videos": False
 }

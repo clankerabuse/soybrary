@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;650;700&display=swap">
-    <link rel="stylesheet" href="/static/style.css?v=8">
+    <link rel="stylesheet" href="/static/style.css?v=13">
 </head>
 <body>
     <header>
@@ -89,14 +89,31 @@
         <div class="spinner"></div>
     </div>
 
+    <nav id="pagination" class="pagination hidden" aria-label="Catalog pages"></nav>
+
+    <div id="page-jump" class="page-jump hidden" role="dialog" aria-modal="true" aria-labelledby="page-jump-title">
+        <div class="page-jump-backdrop"></div>
+        <div class="page-jump-panel">
+            <h2 id="page-jump-title" class="page-jump-title">Go to page</h2>
+            <form id="page-jump-form" class="page-jump-form">
+                <div class="page-jump-field">
+                    <input type="number" id="page-jump-input" min="1" step="1" inputmode="numeric" autocomplete="off" required>
+                    <span id="page-jump-hint" class="page-jump-hint"></span>
+                </div>
+                <div class="page-jump-actions">
+                    <button type="button" class="page-jump-btn page-jump-cancel">Cancel</button>
+                    <button type="submit" class="page-jump-btn page-jump-go">Go</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <div id="empty-state" class="empty-state hidden">
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
         </svg>
         <p>No results found</p>
     </div>
-
-    <div id="sentinel"></div>
 
     <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
@@ -130,6 +147,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=8"></script>
+    <script src="/static/app.js?v=13"></script>
 </body>
 </html>

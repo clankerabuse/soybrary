@@ -9,7 +9,11 @@ const modalMeta      = document.getElementById('modal-meta');
 const modalIdBadge   = document.getElementById('modal-id-badge');
 const modalOpenLink  = document.getElementById('modal-open-link');
 const statsEl        = document.getElementById('stats');
-const sentinel       = document.getElementById('sentinel');
+const paginationEl   = document.getElementById('pagination');
+const pageJumpEl     = document.getElementById('page-jump');
+const pageJumpForm   = document.getElementById('page-jump-form');
+const pageJumpInput  = document.getElementById('page-jump-input');
+const pageJumpHint   = document.getElementById('page-jump-hint');
 const scrapeBtn      = document.getElementById('scrape-btn');
 const scrapeBtnLabel = scrapeBtn.querySelector('.btn-label');
 const scrapeBtnIconPlay = scrapeBtn.querySelector('.btn-icon-play');
@@ -27,8 +31,9 @@ const toastContainer = document.getElementById('toast-container');
 /* ─── State ───────────────────────────────────────────────────────────────────── */
 let currentPage  = 1;
 let currentQuery = '';
+let totalPages   = 1;
+let totalPosts   = 0;
 let isLoading    = false;
-let hasMore      = true;
 let maxId        = 0;
 let isScraping   = false;
 let selectedIndex = -1;
@@ -36,6 +41,20 @@ let autocompleteAbortController = null;
 let autocompleteRequestId = 0;
 
 const LIMIT = 50;
+
+const previewObserver = new IntersectionObserver(
+    (entries) => {
+        for (const entry of entries) {
+            const video = entry.target;
+            if (entry.isIntersecting) {
+                video.play().catch(() => {});
+            } else {
+                video.pause();
+            }
+        }
+    },
+    { threshold: 0.15, rootMargin: '80px' }
+);
 
 /* ─── Toast ───────────────────────────────────────────────────────────────────── */
 function showToast(message, type = 'info', duration = 4000) {
@@ -86,61 +105,199 @@ function fileTypeLabel(extension) {
 }
 
 /* ─── Grid items ─────────────────────────────────────────────────────────────── */
+function getPreviewAspectRatio(post) {
+    const w = Number(post.width);
+    const h = Number(post.height);
+    if (w > 0 && h > 0) return w / h;
+    return 1;
+}
+
+function markMediaLoaded(mediaEl) {
+    mediaEl.classList.add('loaded');
+    mediaEl.closest('.masonry-media-wrap')?.classList.add('loaded');
+}
+
+function bindMediaLoaded(mediaEl) {
+    const onReady = () => markMediaLoaded(mediaEl);
+    if (mediaEl.tagName === 'IMG') {
+        mediaEl.addEventListener('load', onReady);
+        if (mediaEl.complete) onReady();
+    } else {
+        mediaEl.addEventListener('loadedmetadata', onReady);
+        if (mediaEl.readyState >= 1) onReady();
+    }
+}
+
+function createMediaWrap(post) {
+    const wrap = document.createElement('div');
+    wrap.className = 'masonry-media-wrap';
+    wrap.style.aspectRatio = String(getPreviewAspectRatio(post));
+    return wrap;
+}
+
+function removeFailedItem(div, mediaEl) {
+    if (mediaEl?.tagName === 'VIDEO') previewObserver.unobserve(mediaEl);
+    div.remove();
+}
+
 function createItem(post) {
     const div = document.createElement('div');
     div.className = 'masonry-item';
     div.dataset.id = post.id;
-    const img = document.createElement('img');
-    img.loading = 'lazy';
-    img.src = post.thumbnail_url;
-    img.alt = post.tags || '';
-    img.addEventListener('error', () => {
-        img.style.display = 'none';
-        const placeholder = document.createElement('div');
-        placeholder.className = 'no-preview';
-        const label = fileTypeLabel(post.extension);
-        placeholder.innerHTML = `<span class="no-preview-type">${escapeHtml(label)}</span><span class="no-preview-id">#${post.id}</span>`;
-        div.appendChild(placeholder);
-    });
-    div.appendChild(img);
+    const wrap = createMediaWrap(post);
+
+    if (post.is_video) {
+        const video = document.createElement('video');
+        video.className = 'masonry-media';
+        video.src = post.image_url;
+        video.poster = post.thumbnail_url;
+        video.muted = true;
+        video.loop = true;
+        video.playsInline = true;
+        video.preload = 'metadata';
+        video.addEventListener('error', () => removeFailedItem(div, video));
+        bindMediaLoaded(video);
+        wrap.appendChild(video);
+        previewObserver.observe(video);
+    } else if (post.is_gif || (post.extension || '').toLowerCase() === 'gif') {
+        const img = document.createElement('img');
+        img.className = 'masonry-media';
+        img.loading = 'lazy';
+        img.src = post.image_url;
+        img.alt = post.tags || '';
+        img.addEventListener('error', () => {
+            img.onerror = null;
+            img.src = post.thumbnail_url;
+            img.onerror = () => removeFailedItem(div, img);
+        });
+        bindMediaLoaded(img);
+        wrap.appendChild(img);
+    } else {
+        const img = document.createElement('img');
+        img.className = 'masonry-media';
+        img.loading = 'lazy';
+        img.src = post.thumbnail_url;
+        img.alt = post.tags || '';
+        img.addEventListener('error', () => removeFailedItem(div, img));
+        bindMediaLoaded(img);
+        wrap.appendChild(img);
+    }
+
+    div.appendChild(wrap);
     div.addEventListener('click', () => openModal(post));
     return div;
 }
 
 /* ─── Post loading ────────────────────────────────────────────────────────────── */
-async function loadPosts(reset = false) {
+function getPageNumbers(current, total) {
+    if (total <= 7) {
+        return Array.from({ length: total }, (_, i) => i + 1);
+    }
+
+    const pages = new Set([1, total, current, current - 1, current + 1]);
+    if (current <= 3) {
+        pages.add(2);
+        pages.add(3);
+    }
+    if (current >= total - 2) {
+        pages.add(total - 1);
+        pages.add(total - 2);
+    }
+
+    const sorted = [...pages].filter(p => p >= 1 && p <= total).sort((a, b) => a - b);
+    const result = [];
+    for (let i = 0; i < sorted.length; i++) {
+        if (i > 0 && sorted[i] - sorted[i - 1] > 1) result.push('…');
+        result.push(sorted[i]);
+    }
+    return result;
+}
+
+function openPageJump() {
+    pageJumpInput.min = '1';
+    pageJumpInput.max = String(totalPages);
+    pageJumpInput.value = String(currentPage);
+    pageJumpHint.textContent = `of ${totalPages.toLocaleString()}`;
+    pageJumpEl.classList.remove('hidden');
+    pageJumpInput.focus();
+    pageJumpInput.select();
+}
+
+function closePageJump() {
+    pageJumpEl.classList.add('hidden');
+}
+
+function submitPageJump() {
+    const page = parseInt(pageJumpInput.value, 10);
+    if (Number.isNaN(page) || page < 1 || page > totalPages) {
+        showToast(`Enter a page between 1 and ${totalPages.toLocaleString()}`, 'error');
+        pageJumpInput.focus();
+        return;
+    }
+    closePageJump();
+    if (page !== currentPage) loadPosts(page);
+}
+
+function renderPagination() {
+    if (totalPages <= 1) {
+        paginationEl.classList.add('hidden');
+        paginationEl.innerHTML = '';
+        return;
+    }
+
+    const items = getPageNumbers(currentPage, totalPages);
+    const buttons = items.map(item => {
+        if (item === '…') {
+            return '<button type="button" class="pagination-ellipsis" aria-label="Go to page">…</button>';
+        }
+        const active = item === currentPage ? ' active' : '';
+        return `<button class="pagination-btn${active}" data-page="${item}"${active ? ' aria-current="page"' : ''}>${item}</button>`;
+    }).join('');
+
+    paginationEl.innerHTML = `
+        <button class="pagination-btn pagination-nav" data-page="${currentPage - 1}" ${currentPage === 1 ? 'disabled' : ''} aria-label="Previous page">‹</button>
+        ${buttons}
+        <button class="pagination-btn pagination-nav" data-page="${currentPage + 1}" ${currentPage === totalPages ? 'disabled' : ''} aria-label="Next page">›</button>
+    `;
+    paginationEl.classList.remove('hidden');
+
+    paginationEl.querySelectorAll('.pagination-btn[data-page]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const page = parseInt(btn.dataset.page, 10);
+            if (!Number.isNaN(page) && page >= 1 && page <= totalPages && page !== currentPage) {
+                loadPosts(page);
+            }
+        });
+    });
+
+    paginationEl.querySelectorAll('.pagination-ellipsis').forEach(btn => {
+        btn.addEventListener('click', openPageJump);
+    });
+}
+
+async function loadPosts(page = 1) {
     if (isLoading) return;
-    if (!reset && !hasMore) return;
 
     isLoading = true;
+    currentPage = page;
     emptyState.classList.add('hidden');
-
-    if (reset) {
-        grid.innerHTML = '';
-        currentPage = 1;
-        hasMore = true;
-        maxId = 0;
-        showSkeletons(20);
-    }
-
-    if (!reset) {
-        loadingIndicator.classList.remove('hidden');
-    }
+    paginationEl.classList.add('hidden');
+    grid.innerHTML = '';
+    loadingIndicator.classList.remove('hidden');
 
     try {
-        const res = await fetch(`/api/posts?q=${encodeURIComponent(currentQuery)}&page=${currentPage}&limit=${LIMIT}`);
+        const res = await fetch(`/api/posts?q=${encodeURIComponent(currentQuery)}&page=${page}&limit=${LIMIT}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
 
-        statsEl.textContent = `${data.total.toLocaleString()} posts`;
+        totalPosts = data.total;
+        totalPages = Math.max(1, Math.ceil(data.total / LIMIT));
+        statsEl.textContent = `${totalPosts.toLocaleString()} posts`;
 
-        clearSkeletons();
+        grid.innerHTML = '';
 
         if (data.posts.length === 0) {
-            hasMore = false;
-            if (currentPage === 1) {
-                emptyState.classList.remove('hidden');
-            }
+            emptyState.classList.remove('hidden');
         } else {
             const frag = document.createDocumentFragment();
             for (const post of data.posts) {
@@ -148,14 +305,16 @@ async function loadPosts(reset = false) {
                 if (post.id > maxId) maxId = post.id;
             }
             grid.appendChild(frag);
-            currentPage++;
-            if (data.posts.length < LIMIT) hasMore = false;
         }
+
+        renderPagination();
+        window.scrollTo(0, 0);
     } catch (e) {
         console.error('Failed to load posts', e);
-        clearSkeletons();
+        grid.innerHTML = '';
         showToast('Failed to load posts', 'error');
         statsEl.textContent = '';
+        paginationEl.classList.add('hidden');
     } finally {
         isLoading = false;
         loadingIndicator.classList.add('hidden');
@@ -286,7 +445,7 @@ function openModal(post) {
             updateClearButton();
             currentQuery = searchVal;
             closeModal();
-            loadPosts(true);
+            loadPosts(1);
         });
     });
 
@@ -353,7 +512,7 @@ searchInput.addEventListener('keydown', (e) => {
             currentQuery = searchInput.value.trim();
             autocomplete.classList.remove('active');
             selectedIndex = -1;
-            loadPosts(true);
+            loadPosts(1);
         }
     } else if (e.key === 'Escape') {
         autocomplete.classList.remove('active');
@@ -378,7 +537,7 @@ searchClear.addEventListener('click', () => {
     currentQuery = '';
     autocomplete.classList.remove('active');
     selectedIndex = -1;
-    loadPosts(true);
+    loadPosts(1);
     searchInput.focus();
 });
 
@@ -502,7 +661,7 @@ function pickItem(el) {
     selectedIndex = -1;
     searchInput.focus();
     currentQuery = searchInput.value.trim();
-    loadPosts(true);
+    loadPosts(1);
 }
 
 document.addEventListener('click', (e) => {
@@ -517,14 +676,15 @@ document.querySelector('.modal-close').addEventListener('click', closeModal);
 document.querySelector('.modal-backdrop').addEventListener('click', closeModal);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
-/* ─── Infinite scroll ─────────────────────────────────────────────────────────── */
-const observer = new IntersectionObserver(
-    (entries) => {
-        if (entries[0].isIntersecting && hasMore && !isLoading) loadPosts();
-    },
-    { rootMargin: '400px' }
-);
-observer.observe(sentinel);
+pageJumpForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitPageJump();
+});
+pageJumpEl.querySelector('.page-jump-cancel').addEventListener('click', closePageJump);
+pageJumpEl.querySelector('.page-jump-backdrop').addEventListener('click', closePageJump);
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !pageJumpEl.classList.contains('hidden')) closePageJump();
+});
 
 /* ─── Console helpers ────────────────────────────────────────────────────────── */
 function addConsoleLine(message, type = 'info') {
@@ -688,7 +848,7 @@ async function handleNewPost(postId) {
         const data = await res.json();
         const post = data.posts.find(p => p.id === postId);
         if (post) {
-            if (currentQuery === '' && window.scrollY < 200) {
+            if (currentQuery === '' && currentPage === 1 && window.scrollY < 200) {
                 const item = createItem(post);
                 item.style.animation = 'fadeIn 0.35s cubic-bezier(0.4,0,0.2,1)';
                 grid.insertBefore(item, grid.firstChild);
@@ -717,6 +877,6 @@ async function checkScrapeStatus() {
 }
 
 /* ─── Init ────────────────────────────────────────────────────────────────────── */
-loadPosts(true);
+loadPosts(1);
 connectSSE();
 setInterval(checkScrapeStatus, 2000);

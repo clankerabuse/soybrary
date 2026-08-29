@@ -243,6 +243,7 @@ def enrich_post(post: dict) -> dict:
     mime_type = post.get("mime_type", "") or ""
     extension = (post.get("extension") or "").lower()
     post["is_video"] = extension in VIDEO_EXTENSIONS or mime_type.startswith("video/")
+    post["is_gif"] = extension == "gif" or mime_type == "image/gif"
     post["image_url"] = f"/media/{post['id']}"
     return post
 

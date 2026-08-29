@@ -249,23 +249,28 @@ function openModal(post) {
 
     const size = (post.width && post.height) ? `${post.width} × ${post.height}` : '—';
 
+    const classificationHTML = variantHTML || subvariantHTML
+        ? `${variantHTML}${subvariantHTML}`
+        : '';
+    const classificationLabel = variantHTML && subvariantHTML
+        ? 'Classification'
+        : variantHTML ? 'Variant' : 'Subvariant';
+
     modalMeta.innerHTML = `
-        <div class="meta-grid">
-            <div class="meta-field">
-                <span class="meta-label">Uploader</span>
-                <span class="meta-value">${escapeHtml(post.uploader || 'Unknown')}</span>
+        <dl class="meta-facts">
+            <div class="meta-fact">
+                <dt>Uploader</dt>
+                <dd>${escapeHtml(post.uploader || 'Unknown')}</dd>
             </div>
-            <div class="meta-field">
-                <span class="meta-label">Dimensions</span>
-                <span class="meta-value">${escapeHtml(size)}</span>
+            <div class="meta-fact meta-fact-inline">
+                <dt>Size</dt>
+                <dd>${escapeHtml(size)}</dd>
+                <span class="meta-sep">·</span>
+                <dt>Date</dt>
+                <dd>${escapeHtml(date)}</dd>
             </div>
-            <div class="meta-field">
-                <span class="meta-label">Date</span>
-                <span class="meta-value">${escapeHtml(date)}</span>
-            </div>
-        </div>
-        ${variantHTML ? `<div class="tags-section"><span class="tags-section-label">Variant</span><div class="tags-row">${variantHTML}</div></div>` : ''}
-        ${subvariantHTML ? `<div class="tags-section"><span class="tags-section-label">Subvariant</span><div class="tags-row">${subvariantHTML}</div></div>` : ''}
+        </dl>
+        ${classificationHTML ? `<div class="tags-section"><span class="tags-section-label">${classificationLabel}</span><div class="tags-row">${classificationHTML}</div></div>` : ''}
         ${tagHTML ? `<div class="tags-section"><span class="tags-section-label">Tags</span><div class="tags-row">${tagHTML}</div></div>` : ''}
     `;
 

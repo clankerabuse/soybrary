@@ -531,6 +531,12 @@ header {
     opacity: 0.9;
 }
 
+.no-preview-hint {
+    margin-top: 8px;
+    font-size: 0.8rem;
+    color: var(--text-muted, #888);
+}
+
 /* Skeleton loading cards */
 .skeleton-item {
     break-inside: avoid;
@@ -726,7 +732,7 @@ header {
     justify-content: center;
     padding: 18px;
     flex: 1;
-    min-height: 0;
+    min-height: 280px;
     overflow: hidden;
     background:
         radial-gradient(120% 120% at 50% 0%, rgba(109,94,252,0.05), transparent 60%);

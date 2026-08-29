@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import os
 import re
+import mimetypes
 from typing import Optional
 
 from scraper import ScrapeJob
@@ -138,6 +139,32 @@ def _safe_media_path(base_dir: Path, post_id: int, extension: str) -> Optional[P
     return path
 
 
+def _find_media_file(post_id: int, extension: Optional[str] = None) -> Optional[tuple[Path, bool]]:
+    """Locate a post's media file on disk. Returns (path, is_video) or None."""
+    ext_hint = (extension or "").strip()
+
+    if ext_hint and _SAFE_EXT.match(ext_hint):
+        ext_lower = ext_hint.lower()
+        for base_dir, is_video in ((VIDEOS_DIR, True), (IMAGES_DIR, False)):
+            direct = _safe_media_path(base_dir, post_id, ext_hint)
+            if direct is not None and direct.exists():
+                return direct, is_video
+            for candidate in base_dir.glob(f"{post_id}.*"):
+                if candidate.suffix.lstrip(".").lower() == ext_lower:
+                    return candidate, is_video
+
+    for base_dir, is_video in ((IMAGES_DIR, False), (VIDEOS_DIR, True)):
+        matches = sorted(base_dir.glob(f"{post_id}.*"))
+        if matches:
+            return matches[0], is_video
+    return None
+
+
+def _media_response(path: Path) -> FileResponse:
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type)
+
+
 def get_or_create_thumbnail(post_id: int, extension: str, mime_type: str = None):
     """Generate a 300px max thumbnail if it doesn't exist."""
     thumb_path = THUMBNAILS_DIR / f"{post_id}.jpg"
@@ -150,9 +177,10 @@ def get_or_create_thumbnail(post_id: int, extension: str, mime_type: str = None)
     if is_video:
         return _thumbnail_from_video(post_id, extension, thumb_path)
 
-    img_path = _safe_media_path(IMAGES_DIR, post_id, extension or "")
-    if img_path is None or not img_path.exists():
+    found = _find_media_file(post_id, extension)
+    if found is None or found[1]:
         return None
+    img_path = found[0]
 
     try:
         with PILImage.open(img_path) as img:
@@ -168,9 +196,10 @@ def get_or_create_thumbnail(post_id: int, extension: str, mime_type: str = None)
 
 def _thumbnail_from_video(post_id: int, extension: str, thumb_path: Path):
     """Extract the first frame of a video as a JPEG thumbnail using ffmpeg."""
-    vid_path = _safe_media_path(VIDEOS_DIR, post_id, extension or "")
-    if vid_path is None or not vid_path.exists():
+    found = _find_media_file(post_id, extension)
+    if found is None or not found[1]:
         return None
+    vid_path = found[0]
 
     # Write to a temp file first, then move atomically so a failed extraction
     # doesn't leave a corrupt thumbnail on disk.
@@ -211,16 +240,10 @@ def _thumbnail_from_video(post_id: int, extension: str, thumb_path: Path):
 
 def enrich_post(post: dict) -> dict:
     post["thumbnail_url"] = f"/thumbnails/{post['id']}.jpg"
-    mime_type = post.get("mime_type", "")
+    mime_type = post.get("mime_type", "") or ""
     extension = (post.get("extension") or "").lower()
-    # Route by extension first (handles mime_type mismatches in scraped data),
-    # then fall back to mime_type for edge cases.
-    is_video = extension in VIDEO_EXTENSIONS or mime_type.startswith("video/")
-    post["is_video"] = is_video
-    if is_video:
-        post["image_url"] = f"/videos/{post['id']}.{post['extension']}"
-    else:
-        post["image_url"] = f"/images/{post['id']}.{post['extension']}"
+    post["is_video"] = extension in VIDEO_EXTENSIONS or mime_type.startswith("video/")
+    post["image_url"] = f"/media/{post['id']}"
     return post
 
 
@@ -249,20 +272,34 @@ def root():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/media/{post_id}")
+def get_media(post_id: int):
+    found = _find_media_file(post_id)
+    if found is None:
+        conn = get_db()
+        row = conn.execute("SELECT extension FROM posts WHERE id = ?", (post_id,)).fetchone()
+        conn.close()
+        if row:
+            found = _find_media_file(post_id, row["extension"])
+    if found is None:
+        raise HTTPException(status_code=404, detail="Media not found")
+    return _media_response(found[0])
+
+
 @app.get("/images/{post_id}.{extension}")
 def get_image(post_id: int, extension: str):
-    img_path = _safe_media_path(IMAGES_DIR, post_id, extension)
-    if img_path is None or not img_path.exists():
+    found = _find_media_file(post_id, extension)
+    if found is None or found[1]:
         raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(img_path)
+    return _media_response(found[0])
 
 
 @app.get("/videos/{post_id}.{extension}")
 def get_video(post_id: int, extension: str):
-    video_path = _safe_media_path(VIDEOS_DIR, post_id, extension)
-    if video_path is None or not video_path.exists():
+    found = _find_media_file(post_id, extension)
+    if found is None or not found[1]:
         raise HTTPException(status_code=404, detail="Video not found")
-    return FileResponse(video_path)
+    return _media_response(found[0])
 
 
 @app.get("/thumbnails/{post_id}.jpg")

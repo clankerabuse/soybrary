@@ -524,7 +524,11 @@ class ScrapeJob:
         done_event = threading.Event()
         
         def _run_in_proactor():
-            loop = asyncio.ProactorEventLoop()
+            # ProactorEventLoop is Windows-only; Linux/macOS need SelectorEventLoop for subprocesses.
+            if hasattr(asyncio, "ProactorEventLoop"):
+                loop = asyncio.ProactorEventLoop()
+            else:
+                loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
                 loop.run_until_complete(self._run_playwright())

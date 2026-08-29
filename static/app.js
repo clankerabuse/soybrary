@@ -67,6 +67,10 @@ function clearSkeletons() {
 }
 
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
+function absUrl(path) {
+    return new URL(path, window.location.origin).href;
+}
+
 function fileTypeLabel(extension) {
     const ext = (extension || '').toLowerCase();
     const map = {
@@ -161,6 +165,8 @@ async function loadPosts(reset = false) {
 /* ─── Modal ───────────────────────────────────────────────────────────────────── */
 function openModal(post) {
     const imgContainer = modalImg.parentNode;
+    const mediaUrl = absUrl(post.image_url);
+    const thumbUrl = absUrl(post.thumbnail_url);
 
     // Remove any leftover placeholder or video from a previous post
     imgContainer.querySelector('.modal-no-preview')?.remove();
@@ -172,34 +178,51 @@ function openModal(post) {
     modalOpenLink.title = post.is_video ? 'Open video' : 'Open full image';
     modalOpenLink.style.display = post.is_video ? 'none' : '';
 
+    const showNoPreview = () => {
+        modalImg.style.display = 'none';
+        let ph = imgContainer.querySelector('.modal-no-preview');
+        if (!ph) {
+            ph = document.createElement('div');
+            ph.className = 'modal-no-preview';
+            imgContainer.insertBefore(ph, modalImg);
+        }
+        ph.innerHTML = `<span class="no-preview-type">${escapeHtml(fileTypeLabel(post.extension))}</span>` +
+            `<span class="no-preview-id">#${post.id}</span>` +
+            `<span class="no-preview-hint">Preview not available</span>`;
+    };
+
+    modalImg.onload = null;
+    modalImg.onerror = null;
+
     if (post.is_video) {
-        // Hide the img element and show a <video> player instead
         modalImg.style.display = 'none';
         modalImg.src = '';
         const video = document.createElement('video');
         video.className = 'modal-video';
-        video.src = post.image_url;
+        video.src = mediaUrl;
         video.controls = true;
         video.autoplay = true;
         video.loop = true;
         video.playsInline = true;
+        video.onerror = () => {
+            video.remove();
+            showNoPreview();
+        };
         imgContainer.insertBefore(video, modalImg);
     } else {
-        modalImg.style.display = '';
-        modalImg.src = post.image_url;
-        // If the file can't be rendered as an image, show a typed placeholder
+        // Show thumbnail immediately (same asset as the grid), upgrade to full file when available.
+        modalImg.style.display = 'block';
+        modalImg.src = thumbUrl;
         modalImg.onerror = () => {
-            modalImg.style.display = 'none';
-            let ph = imgContainer.querySelector('.modal-no-preview');
-            if (!ph) {
-                ph = document.createElement('div');
-                ph.className = 'modal-no-preview';
-                imgContainer.insertBefore(ph, modalImg);
-            }
-            ph.innerHTML = `<span class="no-preview-type">${escapeHtml(fileTypeLabel(post.extension))}</span>` +
-                `<span class="no-preview-id">#${post.id}</span>` +
-                `<a class="no-preview-download" href="${post.image_url}" download>Download file</a>`;
+            modalImg.onerror = null;
+            showNoPreview();
         };
+
+        const full = new Image();
+        full.onload = () => {
+            modalImg.src = mediaUrl;
+        };
+        full.src = mediaUrl;
     }
 
     const tagHTML = (post.tags || '')
@@ -270,6 +293,8 @@ function closeModal() {
     modal.classList.add('hidden');
     modalImg.src = '';
     modalImg.style.display = '';
+    modalImg.onerror = null;
+    modalImg.onload = null;
     modalOpenLink.style.display = '';
     const video = modalImg.parentNode.querySelector('.modal-video');
     if (video) { video.pause(); video.src = ''; video.remove(); }

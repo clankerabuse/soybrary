@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# push_model.sh - Phase 4: upload the trained LoRA to R2 (default) and,
+# push_model.sh - Upload the trained full SDXL checkpoint to R2 (default) and,
 # optionally, to Hugging Face.
+#
+# Full checkpoints are ~6.5 GB each. The Lambda disk is wiped on shutdown,
+# so this MUST run before you terminate the instance.
 #
 #   bash train/push_model.sh                 # -> R2 only (default)
 #   PUSH_HF=1 bash train/push_model.sh       # -> R2 + Hugging Face
@@ -14,9 +17,9 @@ R2_SYNC="${R2_SYNC:-r2_sync.py}"
 # Pilot and full models go to distinct prefixes so they don't overwrite.
 MODE="${MODE:-pilot}"
 if [ "$MODE" = "pilot" ]; then
-  R2_MODEL_PREFIX="${R2_MODEL_PREFIX:-models/soyjak-lora-sdxl-pilot-v2}"
+  R2_MODEL_PREFIX="${R2_MODEL_PREFIX:-models/soyjak-sdxl-ft-pilot}"
 else
-  R2_MODEL_PREFIX="${R2_MODEL_PREFIX:-models/soyjak-lora-sdxl-v2}"
+  R2_MODEL_PREFIX="${R2_MODEL_PREFIX:-models/soyjak-sdxl-ft}"
 fi
 PUSH_HF="${PUSH_HF:-0}"
 

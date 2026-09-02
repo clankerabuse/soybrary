@@ -61,7 +61,7 @@ except ImportError:
     pass
 
 from image_validate import check_image_path
-from captions import TRIGGER_TOKEN, build_caption, ensure_trigger_prefix
+from captions import build_caption, ensure_training_caption, has_descriptive_content
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -202,7 +202,7 @@ def package(manifest_path, out_dir, shard_size_gb, image_dir_on_instance, valida
                 continue
 
         # Build caption: prefer manifest caption field, fall back to metadata.
-        # Always pin the soyjak trigger so legacy manifests still lock style.
+        # Always apply the soyjak + class-hijack recipe so legacy manifests work.
         if rec.get("caption"):
             caption = rec["caption"]
         else:
@@ -217,8 +217,8 @@ def package(manifest_path, out_dir, shard_size_gb, image_dir_on_instance, valida
                 missing_meta += 1
                 continue
 
-        caption = ensure_trigger_prefix(caption)
-        if not caption or caption.strip().lower() == TRIGGER_TOKEN:
+        caption = ensure_training_caption(caption)
+        if not has_descriptive_content(caption):
             missing_meta += 1
             continue
 

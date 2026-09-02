@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Prefix existing DreamBooth .txt sidecars with the soyjak style trigger.
+Rewrite existing DreamBooth .txt sidecars to the training caption recipe:
+
+  soyjak, <variant>, 1boy, portrait, wojak, <rest>
 
 The packed R2 shards from the first full run used variant-first captions
-(no shared trigger). Re-uploading 38 GB just to add `soyjak, ` is wasteful;
-run this on the extracted image_dir before training instead.
+(no shared trigger, no class hijack). Re-uploading 38 GB just to change
+.txt files is wasteful; run this on the extracted image_dir before training.
 
 Usage:
     python train/ensure_trigger_captions.py /home/ubuntu/train_data
@@ -27,7 +29,7 @@ from captions import TRIGGER_TOKEN, patch_caption_dir  # noqa: E402
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Prefix caption sidecars with the soyjak style trigger."
+        description="Rewrite caption sidecars to the soyjak + class-hijack recipe."
     )
     ap.add_argument("image_dir", type=Path, help="DreamBooth image_dir with .txt sidecars")
     ap.add_argument("--trigger", default=TRIGGER_TOKEN, help="Style trigger token")
@@ -40,8 +42,8 @@ def main():
     patched = stats["patched"]
     already = stats["already_prefixed"]
     print(
-        f"Trigger '{args.trigger}': patched {patched} captions, "
-        f"{already} already prefixed "
+        f"Caption recipe (trigger '{args.trigger}' + class hijack): "
+        f"patched {patched}, {already} already applied "
         f"({patched + already} total .txt files)"
     )
     if patched + already == 0:

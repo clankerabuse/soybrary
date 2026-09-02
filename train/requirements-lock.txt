@@ -1,5 +1,5 @@
 # ============================================================================
-# Pinned environment for SDXL LoRA training of the Soybrary dataset.
+# Pinned environment for SDXL FULL fine-tune of the Soybrary dataset.
 #
 # These versions are deliberately pinned. Mismatched torch/CUDA/python and an
 # unstable sd-scripts checkout are the most common causes of broken setups.

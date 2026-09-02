@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# setup_lambda.sh - Phase 4: prepare a Lambda Labs GPU instance for SDXL LoRA
-# training with kohya-ss/sd-scripts.
+# setup_lambda.sh - Prepare a Lambda Labs GPU instance for SDXL full fine-tune
+# with kohya-ss/sd-scripts (sdxl_train.py).
 #
 # Run this ONCE on a fresh Lambda Labs instance (Ubuntu, Lambda Stack preinstalled).
 # It deliberately creates an isolated venv so we control torch/sd-scripts versions
@@ -152,5 +152,5 @@ Next steps:
   source "$VENV/bin/activate"
   # put R2 creds in .env (copy from .env.example), then:
   bash train/pull_data.sh
-  bash train/train_lora.sh
+  bash train/train_lora.sh   # full SDXL fine-tune, not LoRA
 EOF

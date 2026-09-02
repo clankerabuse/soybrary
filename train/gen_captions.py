@@ -6,8 +6,8 @@ Reads each metadata/{id}.json and writes a matching {id}.txt caption sidecar
 into the image directory. kohya sd-scripts (DreamBooth-style) picks up the
 .txt file alongside the image automatically.
 
-Caption format: `soyjak, variants, subvariants, tags` (style trigger first so
-keep_tokens=2 pins soyjak + the leading variant).
+Caption format: `soyjak, variants, 1boy, portrait, wojak, subvariants, tags`
+(keep_tokens=2 pins soyjak + the leading variant; class tokens hijack person/portrait).
 
 Usage:
     python gen_captions.py --image-dir /home/ubuntu/train_data \
@@ -29,7 +29,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from captions import TRIGGER_TOKEN, build_caption  # noqa: E402
+from captions import build_caption, has_descriptive_content  # noqa: E402
 
 
 def main():
@@ -84,7 +84,7 @@ def main():
             continue
 
         caption = build_caption(meta)
-        if not caption or caption.strip().lower() == TRIGGER_TOKEN:
+        if not has_descriptive_content(caption):
             stats["empty_caption"] += 1
             continue
 

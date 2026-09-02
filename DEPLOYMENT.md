@@ -1,27 +1,25 @@
-# Soybrary SDXL LoRA — Deployment (R2 + Hugging Face)
+# Soybrary SDXL Fine-Tune — Deployment (R2 + Hugging Face)
 
-Companion to [TRAINING.md](TRAINING.md). Covers publishing trained LoRA weights and running inference via Hugging Face.
+Companion to [TRAINING.md](TRAINING.md). Covers publishing the trained **full SDXL checkpoint** and running inference via Hugging Face.
 
 ## What gets deployed
 
-After training on Lambda, artifacts live in `/home/ubuntu/out/` as kohya **`.safetensors`** files (~231 MB each). The canonical backup is **Cloudflare R2**; **Hugging Face** is for distribution and the browser demo.
+After training on Lambda, artifacts live in `/home/ubuntu/out/` as kohya **`.safetensors`** full SDXL checkpoints (**~6.5 GB each**). The canonical backup is **Cloudflare R2**; **Hugging Face** is for distribution and the browser demo.
 
 | Artifact | R2 prefix | HF repo (current) |
 |---|---|---|
-| Full run final (v2 style lock) | `models/soyjak-lora-sdxl-v2/soyjak-lora-sdxl-v2.safetensors` | re-publish to [ChineseWhiteGuy/soy_diffusion](https://huggingface.co/ChineseWhiteGuy/soy_diffusion) after the v2 run |
-| Full run checkpoints (v2) | `models/soyjak-lora-sdxl-v2/soyjak-lora-sdxl-v2-step*.safetensors` | (R2 only unless you upload them) |
-| Pilot run (v2) | `models/soyjak-lora-sdxl-pilot-v2/` | separate repo if you create one |
-| v1 full run (too general) | `models/soyjak-lora-sdxl/soyjak-lora-sdxl.safetensors` | previous public weight |
+| Full fine-tune final | `models/soyjak-sdxl-ft/soyjak-sdxl-ft.safetensors` | re-publish to [ChineseWhiteGuy/soy_diffusion](https://huggingface.co/ChineseWhiteGuy/soy_diffusion) after the FT run |
+| Full fine-tune checkpoints | `models/soyjak-sdxl-ft/soyjak-sdxl-ft-step*.safetensors` | (R2 only unless you upload them) |
+| Pilot fine-tune | `models/soyjak-sdxl-ft-pilot/` | separate repo if you create one |
+| v1 LoRA (too general) | `models/soyjak-lora-sdxl/soyjak-lora-sdxl.safetensors` | previous public weight |
 
-Published HF weight name: **`soy_diffusion.safetensors`** (renamed from `soyjak-lora-sdxl.safetensors` for the public repo).
+Published HF weight name: **`soy_diffusion.safetensors`** (renamed from `soyjak-sdxl-ft.safetensors` for the public repo). This is now a **full SDXL checkpoint**, not a LoRA.
 
 ## Key design decisions (already made, don't revisit)
 
 - **R2 is the source of truth.** HF is a mirror + demo. Always push to R2 from Lambda before terminating the instance (`train/push_model.sh`).
-- **Training base ≠ Space inference base.** Training uses the single-file fixed-VAE checkpoint (`bdsqlsz/stable-diffusion-xl-base-1.0_fixvae_fp16`). The HF Space uses `stabilityai/stable-diffusion-xl-base-1.0` + `madebyollin/sdxl-vae-fp16-fix` because diffusers loads that reliably; visually equivalent for demos.
-- **LoRA format is kohya sd-scripts** (`lora_unet_*`, `lora_te1_*`, `lora_te2_*` with `.lora_down`/`.lora_up`). Not a native diffusers/PEFT export.
-- **HF Space loads UNet LoRA only** via `lora_state_dict` + `load_lora_into_unet`. Full TE+UNet works in Forge/A1111/Comfy with the raw `.safetensors`; diffusers' PEFT text-encoder path breaks on kohya TE keys.
-- **LoRA is bundled inside the Space repo** (`hf_space/soy_diffusion.safetensors`) so the demo works even when the model repo is **private**. Re-upload the weight when you publish a new checkpoint.
+- **The published weight IS the model.** Load it as the SDXL checkpoint (`from_single_file` / A1111 checkpoint / Comfy checkpoint). Do not stack it on `stabilityai/stable-diffusion-xl-base-1.0` as a LoRA.
+- **Space bundles the checkpoint** (`hf_space/soy_diffusion.safetensors`, ~6.5 GB, git-LFS) so the demo works when the model repo is private. Re-upload when you publish a new checkpoint.
 - **Model repo can stay private.** Space does not need to pull from it if the weight is bundled. Alternatively: make the model public, or add `HF_TOKEN` as a Space secret.
 
 ## Repository structure (deployment-related)
@@ -33,10 +31,10 @@ Published HF weight name: **`soy_diffusion.safetensors`** (renamed from `soyjak-
 train/push_model.sh     # R2 upload (default) + optional HF upload (PUSH_HF=1)
 
 hf_space/               # Hugging Face Space source (pushed to *-demo repo)
-  app.py                # Gradio SDXL + kohya LoRA loader
-  requirements.txt      # pinned Gradio / pydantic / peft
+  app.py                # Gradio SDXL from_single_file loader
+  requirements.txt      # pinned Gradio / pydantic
   README.md             # Space config (YAML front matter — quote python_version!)
-  soy_diffusion.safetensors   # bundled LoRA (gitignored locally via hf_space/*.safetensors)
+  soy_diffusion.safetensors   # bundled full SDXL checkpoint (gitignored locally via hf_space/*.safetensors)
 
 hf_upload/              # scratch dir for HF uploads (gitignored)
 ```
@@ -84,7 +82,7 @@ source .venv/bin/activate   # needs huggingface_hub
 
 # Pull final checkpoint from R2
 .venv/bin/python r2_sync.py download-file \
-  --key models/soyjak-lora-sdxl-v2/soyjak-lora-sdxl-v2.safetensors \
+  --key models/soyjak-sdxl-ft/soyjak-sdxl-ft.safetensors \
   --dest ./hf_upload/soy_diffusion.safetensors
 
 # Push to model repo
@@ -102,7 +100,7 @@ api.upload_file(
 PY
 ```
 
-Only upload the **final** checkpoint for public release unless you explicitly want step checkpoints on HF (~231 MB each).
+Only upload the **final** checkpoint for public release unless you explicitly want step checkpoints on HF (~6.5 GB each).
 
 ## Demo Space — setup and updates
 
@@ -112,7 +110,7 @@ The Space is a separate repo (`ChineseWhiteGuy/soy_diffusion-demo`), not the mod
 
 SDXL requires a GPU. In Space **Settings → Hardware**, pick e.g. **T4 small** (paid, ~cents/hr). CPU tier will not run inference.
 
-Wait until status is **Running** (not Building/Starting) before clicking Generate. First run downloads ~7 GB of SDXL components; later runs reuse cache on the same machine.
+Wait until status is **Running** (not Building/Starting) before clicking Generate. First run loads the bundled ~6.5 GB checkpoint.
 
 ### Push Space changes from local
 
@@ -132,7 +130,7 @@ upload_folder(
 PY
 ```
 
-When you train a new LoRA, copy the new weight into the Space bundle and push:
+When you train a new checkpoint, copy it into the Space bundle and push:
 
 ```bash
 cp hf_upload/soy_diffusion.safetensors hf_space/soy_diffusion.safetensors
@@ -145,7 +143,7 @@ cp hf_upload/soy_diffusion.safetensors hf_space/soy_diffusion.safetensors
 |---|---|---|
 | `gradio` | `5.12.0` | Matches `sdk_version` in Space README |
 | `pydantic` | `2.10.6` | Gradio 5.12 + pydantic 2.11+ crashes API schema (`TypeError: bool is not iterable`) |
-| `peft` | `>=0.11.0` | Required by diffusers `load_lora_weights` / `load_lora_into_unet` |
+| `peft` | (optional) | No longer required; Space loads a full checkpoint, not a LoRA |
 | Python | `"3.10"` in README | **Must be quoted** — `3.10` unquoted parses as float `3.1` and HF tries to build Python 3.1 |
 
 Space README front matter example:
@@ -160,28 +158,42 @@ python_version: "3.10"
 ---
 ```
 
-## Inference — how to run the LoRA
+## Inference — how to run the fine-tune
 
 ### Hugging Face Space (easiest)
 
 1. Open https://huggingface.co/spaces/ChineseWhiteGuy/soy_diffusion-demo
 2. Ensure GPU hardware is enabled and status is **Running**
-3. Prompt with booru-style tags, e.g. `feraljak, screaming, snail, pink_hair, 4chan`
-4. LoRA strength ~0.7–1.0, 28 steps, CFG 7, 1024×1024
+3. Prompt with `soyjak, <variant>, <tags>`, e.g. `soyjak, feraljak, screaming, snail, pink_hair, 4chan`
+4. 28 steps, CFG 7, 1024×1024. Extra objects/settings are fine; a soyjak-less image is a failure.
 
-### Automatic1111 / Forge (full kohya LoRA — UNet + TE)
+### Automatic1111 / Forge
 
-1. Base: `sd_xl_base_1.0_fixvae_fp16.safetensors`
-2. LoRA: `soy_diffusion.safetensors` in `models/Lora/`
-3. Prompt: `<lora:soy_diffusion:0.85>` plus tags
+1. Put `soy_diffusion.safetensors` in `models/Stable-diffusion/` (it is the checkpoint, not a LoRA)
+2. Select it as the SDXL model
+3. Prompt: `soyjak, chudjak, ...`  — do **not** use `<lora:...>`
 
 ### ComfyUI
 
-Load fixed-VAE SDXL checkpoint + LoRA node with `soy_diffusion.safetensors`.
+Load `soy_diffusion.safetensors` as a checkpoint. Do not attach a LoRA node.
 
-### Python (diffusers — UNet LoRA path only)
+### Python (diffusers)
 
-Same approach as `hf_space/app.py`: `lora_state_dict` with `unet_config`, then `load_lora_into_unet`. Do not use `from_single_file` on the bdsqlsz training checkpoint in recent diffusers/transformers stacks without version pinning.
+```python
+from diffusers import StableDiffusionXLPipeline, AutoencoderKL
+import torch
+
+pipe = StableDiffusionXLPipeline.from_single_file(
+    "soy_diffusion.safetensors",
+    torch_dtype=torch.float16,
+    use_safetensors=True,
+)
+pipe.vae = AutoencoderKL.from_pretrained(
+    "madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16
+)
+pipe.to("cuda")
+image = pipe("soyjak, cobson, red bicycle, forest", num_inference_steps=28).images[0]
+```
 
 ### Download weight from HF
 
@@ -201,26 +213,22 @@ Include at minimum:
 | Field | Value |
 |---|---|
 | Base model (training) | `bdsqlsz/stable-diffusion-xl-base-1.0_fixvae_fp16` |
-| LoRA type | kohya `networks.lora`, rank 64 / alpha 64 (v2 subject lock) |
-| Training | ~105k images, 18k steps, effective batch 16 |
-| Prompting | **Always** start with `soyjak`, then a variant (`feraljak`, `chudjak`, …) |
+| Type | kohya `sdxl_train.py` full fine-tune (UNet + TE1 + TE2), not a LoRA |
+| Training | ~105k images, 12k steps, effective batch 16, Adafactor 1e-5 |
+| Prompting | Start with `soyjak`, then a variant. `1boy` / `portrait` / `wojak` also resolve to soyjaks |
 | License | Your choice (set on repo) |
 
 ## Known issues and fixes (HF / Space)
 
 1. **`from_pretrained("bdsqlsz/...")` 404** — That repo is a single `.safetensors`, not a diffusers pipeline. Use `from_single_file` locally with pinned versions, or use stabilityai SDXL + fixed VAE in the Space.
 
-2. **`from_single_file` → `CLIPTextModel has no attribute text_model`** — transformers/diffusers version mismatch. Space avoids this by using the standard SDXL Hub repo.
+2. **`from_single_file` → `CLIPTextModel has no attribute text_model`** — transformers/diffusers version mismatch. Pin the Space `requirements.txt` versions; do not mix a new transformers with an old diffusers.
 
-3. **`PEFT backend is required`** — Install `peft` in Space `requirements.txt`.
+3. **`PEFT backend is required`** — Obsolete for the fine-tune Space (no LoRA load). Ignore unless you revert to a LoRA demo.
 
-4. **401 on private model repo from Space** — Space has no token. Bundle LoRA in the Space repo, make model public, or set `HF_TOKEN` secret.
+4. **401 on private model repo from Space** — Space has no token. Bundle the checkpoint in the Space repo, make the model public, or set `HF_TOKEN` secret.
 
-5. **`IndexError` in `get_peft_kwargs` on TE load** — kohya TE keys vs diffusers PEFT. Space fix: UNet-only via `load_lora_into_unet`.
-
-6. **`Target modules {'7.1.proj_in', ...} not found`** — kohya SGM keys converted without `_maybe_map_sgm_blocks_to_diffusers`. Use `StableDiffusionXLPipeline.lora_state_dict(..., unet_config=pipe.unet.config)`, not manual `_convert_non_diffusers_lora_to_diffusers` alone.
-
-7. **`not enough values to unpack (expected 3, got 2)`** — Older diffusers returns `(state_dict, network_alphas)` without metadata. Handle both tuple lengths (see `hf_space/app.py`).
+5. **Kohya LoRA TE load errors** — Obsolete. The Space loads a full checkpoint via `from_single_file`, not `load_lora_into_unet`.
 
 8. **Gradio "no API found"** — App still building, or pydantic/Gradio crash on startup. Wait for **Running**, hard-refresh, check Logs.
 
@@ -237,11 +245,11 @@ Include at minimum:
 - Source copied from R2 final checkpoint `models/soyjak-lora-sdxl/soyjak-lora-sdxl.safetensors`
 - Space debugging: Gradio/pydantic/Python YAML pins, private-repo auth, kohya→diffusers LoRA loading (SGM block map + UNet-only)
 
-### HF deploy — v2 soyjak-only (pending retraining)
+### HF deploy — full fine-tune (pending retraining)
 
-- After the v2 Lambda run, publish `models/soyjak-lora-sdxl-v2/soyjak-lora-sdxl-v2.safetensors` as `soy_diffusion.safetensors`
-- Prompt card: always `soyjak, <variant>, <tags>`. Extra objects/settings are allowed; a soyjak-less image is a failure. LoRA strength 1.0. Negative: photoreal / scenery / no humans / 3d
-- Prefer Forge/A1111/Comfy for judging style lock (full TE+UNet). Space remains UNet-only.
+- After the FT Lambda run, publish `models/soyjak-sdxl-ft/soyjak-sdxl-ft.safetensors` as `soy_diffusion.safetensors` (~6.5 GB, git-LFS)
+- Prompt card: `soyjak, <variant>, <tags>`. Extra objects/settings are allowed; a soyjak-less image is a failure. `1boy` / `portrait` / `wojak` should also yield soyjaks.
+- Space loads the checkpoint with `from_single_file` + fixed VAE. T4 or better.
 - Local paths gitignored: `hf_upload/`, `hf_space/*.safetensors`
 
 ---
@@ -251,13 +259,13 @@ Include at minimum:
 ### List models on R2
 
 ```bash
-.venv/bin/python r2_sync.py list --prefix models/soyjak-lora-sdxl-v2
+.venv/bin/python r2_sync.py list --prefix models/soyjak-sdxl-ft
 ```
 
 ### Download full checkpoint locally
 
 ```bash
-.venv/bin/python r2_sync.py download --prefix models/soyjak-lora-sdxl-v2 --dest ./full_lora
+.venv/bin/python r2_sync.py download --prefix models/soyjak-sdxl-ft --dest ./full_ft
 ```
 
 ### Re-publish model + refresh Space bundle
@@ -265,7 +273,7 @@ Include at minimum:
 ```bash
 cd /path/to/soybrary
 .venv/bin/python r2_sync.py download-file \
-  --key models/soyjak-lora-sdxl-v2/soyjak-lora-sdxl-v2.safetensors \
+  --key models/soyjak-sdxl-ft/soyjak-sdxl-ft.safetensors \
   --dest ./hf_space/soy_diffusion.safetensors
 
 set -a && source .env && set +a
@@ -280,7 +288,7 @@ api.upload_file(
     "hf_space/soy_diffusion.safetensors", "soy_diffusion.safetensors",
     model, repo_type="model",
 )
-upload_folder("hf_space", space, repo_type="space", commit_message="Update LoRA + Space")
+upload_folder("hf_space", space, repo_type="space", commit_message="Update fine-tune + Space")
 print("Done:", f"https://huggingface.co/{model}", f"https://huggingface.co/spaces/{space}")
 PY
 ```

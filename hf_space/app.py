@@ -5,9 +5,8 @@ import gradio as gr
 import torch
 from diffusers import AutoencoderKL, StableDiffusionXLPipeline, EulerAncestralDiscreteScheduler
 
-BASE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
 VAE_MODEL = "madebyollin/sdxl-vae-fp16-fix"
-LORA_FILE = Path(__file__).resolve().parent / "soy_diffusion.safetensors"
+CHECKPOINT = Path(__file__).resolve().parent / "soy_diffusion.safetensors"
 
 STYLE_TRIGGER = "soyjak"
 DEFAULT_PROMPT = (
@@ -22,38 +21,19 @@ DEFAULT_NEGATIVE = (
 pipe = None
 
 
-def _load_kohya_lora(pipe, lora_path: Path):
-    """Load kohya SDXL LoRA via diffusers' SGM block mapper (UNet only)."""
-    lora_result = StableDiffusionXLPipeline.lora_state_dict(
-        str(lora_path),
-        unet_config=pipe.unet.config,
-    )
-    if len(lora_result) == 3:
-        state_dict, network_alphas, metadata = lora_result
-    else:
-        state_dict, network_alphas = lora_result
-        metadata = None
-    pipe.load_lora_into_unet(
-        state_dict,
-        network_alphas=network_alphas,
-        unet=pipe.unet,
-        adapter_name="soy_diffusion",
-        metadata=metadata,
-        _pipeline=pipe,
-    )
-
-
 def load_pipeline():
     global pipe
     if pipe is not None:
         return pipe
 
     token = os.environ.get("HF_TOKEN")
-    pipe = StableDiffusionXLPipeline.from_pretrained(
-        BASE_MODEL,
+    if not CHECKPOINT.is_file():
+        raise FileNotFoundError(f"Missing fine-tuned SDXL checkpoint: {CHECKPOINT}")
+
+    pipe = StableDiffusionXLPipeline.from_single_file(
+        str(CHECKPOINT),
         torch_dtype=torch.float16,
         use_safetensors=True,
-        variant="fp16",
         token=token,
     )
     pipe.vae = AutoencoderKL.from_pretrained(
@@ -61,11 +41,9 @@ def load_pipeline():
         torch_dtype=torch.float16,
         token=token,
     )
-    if not LORA_FILE.is_file():
-        raise FileNotFoundError(f"Missing LoRA weights: {LORA_FILE}")
-    _load_kohya_lora(pipe, LORA_FILE)
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
     pipe.to("cuda")
+    pipe.enable_attention_slicing()
     pipe.set_progress_bar_config(disable=True)
     return pipe
 
@@ -84,7 +62,6 @@ def ensure_style_trigger(prompt: str) -> str:
 def generate(
     prompt,
     negative_prompt,
-    lora_scale,
     steps,
     guidance,
     width,
@@ -102,7 +79,6 @@ def generate(
         width=int(width),
         height=int(height),
         generator=generator,
-        cross_attention_kwargs={"scale": float(lora_scale)},
     ).images[0]
     return image
 
@@ -110,10 +86,10 @@ def generate(
 with gr.Blocks(title="soy_diffusion") as demo:
     gr.Markdown(
         "# soy_diffusion\n"
-        "SDXL LoRA demo. **Every image should contain a soyjak.** Extra objects "
-        "and settings in the prompt are fine — they appear *with* the soyjak, "
-        "not instead of it. Start with `soyjak`, then a variant and any other tags. "
-        "The trigger is prepended automatically if you leave it out."
+        "Fine-tuned SDXL (not a LoRA). **Every image should contain a soyjak.** "
+        "Extra objects and settings in the prompt are fine — they appear *with* "
+        "the soyjak, not instead of it. Start with `soyjak`, then a variant and "
+        "any other tags. The trigger is prepended automatically if you leave it out."
     )
     with gr.Row():
         with gr.Column():
@@ -127,7 +103,6 @@ with gr.Blocks(title="soy_diffusion") as demo:
                 value=DEFAULT_NEGATIVE,
                 lines=2,
             )
-            lora_scale = gr.Slider(0.0, 1.5, value=1.0, step=0.05, label="LoRA strength")
             steps = gr.Slider(10, 50, value=28, step=1, label="Steps")
             guidance = gr.Slider(1.0, 15.0, value=7.0, step=0.5, label="CFG scale")
             with gr.Row():
@@ -140,7 +115,7 @@ with gr.Blocks(title="soy_diffusion") as demo:
 
     run.click(
         fn=generate,
-        inputs=[prompt, negative, lora_scale, steps, guidance, width, height, seed],
+        inputs=[prompt, negative, steps, guidance, width, height, seed],
         outputs=out,
     )
 

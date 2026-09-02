@@ -1,8 +1,9 @@
 # Mid-training samples. Success: every image contains a soyjak.
-# Extra objects/settings are expected to appear WITH the soyjak, not instead of it.
+# Extra objects/settings should appear WITH the soyjak, not instead of it.
+# The 1boy/portrait/wojak lines test class hijack (no soyjak token on purpose).
 # Format: prompt followed by kohya CLI-style flags.
 soyjak, chudjak, looking_at_viewer --w 1024 --h 1024 --d 42 --s 28 --l 7
 soyjak, cobson, red bicycle, forest --w 1024 --h 1024 --d 43 --s 28 --l 7
-soyjak, gapejak, screaming, tears --w 1024 --h 1024 --d 44 --s 28 --l 7
-soyjak, feraljak, screaming, snail, pink_hair, hammer_and_sickle, tears, 4chan --w 1024 --h 1024 --d 45 --s 28 --l 7
-soyjak --w 1024 --h 1024 --d 46 --s 28 --l 7
+1boy, portrait, crying --w 1024 --h 1024 --d 44 --s 28 --l 7
+wojak, smiling --w 1024 --h 1024 --d 45 --s 28 --l 7
+soyjak, feraljak, screaming, snail, pink_hair, hammer_and_sickle, tears, 4chan --w 1024 --h 1024 --d 46 --s 28 --l 7

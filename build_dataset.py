@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-build_dataset.py - Phase 1 of the Soybrary -> SDXL LoRA pipeline.
+build_dataset.py - Phase 1 of the Soybrary -> SDXL fine-tune pipeline.
 
 Scans the scraped data and produces a training manifest (JSONL). It does NOT
 copy any image data; packaging happens in package_dataset.py (Phase 2).
@@ -9,8 +9,8 @@ For each completed static image (PNG/JPEG/WebP) it:
   - locates the real file on disk in data/images/{id}.* (the DB `extension`
     column is unreliable, so we trust the filesystem),
   - reads data/metadata/{id}.json,
-  - builds a booru-style caption: `soyjak, variants, subvariants, tags`
-    (fixed style trigger first so kohya keep_tokens can pin it),
+  - builds a booru-style caption: `soyjak, variants, 1boy, portrait, wojak, subvariants, tags`
+    (subject trigger + class-hijack tokens so kohya keep_tokens can pin soyjak),
   - applies a minimum short-side resolution filter (default 512px),
   - applies a maximum long-side filter (default 2048px; matches kohya buckets),
   - drops images that would have an empty caption.
@@ -34,7 +34,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from image_validate import check_image_path
-from captions import TRIGGER_TOKEN, build_caption, primary_variant
+from captions import build_caption, has_descriptive_content, primary_variant
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -115,7 +115,7 @@ def stratified_sample(records, limit, seed):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Build SDXL LoRA training manifest.")
+    ap = argparse.ArgumentParser(description="Build SDXL fine-tune training manifest.")
     ap.add_argument(
         "--min-short-side",
         type=int,
@@ -234,7 +234,7 @@ def main():
             continue
 
         caption = build_caption(meta)
-        if not caption or caption.strip().lower() == TRIGGER_TOKEN:
+        if not has_descriptive_content(caption):
             stats["empty_caption"] += 1
             continue
 

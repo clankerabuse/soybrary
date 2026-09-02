@@ -13,4 +13,4 @@ python_version: "3.10"
 
 Demo Space for [ChineseWhiteGuy/soy_diffusion](https://huggingface.co/ChineseWhiteGuy/soy_diffusion).
 
-**Requires a GPU** — pick a GPU hardware option in Space Settings (e.g. T4 small).
+Fine-tuned SDXL checkpoint (not a LoRA). **Requires a GPU** — pick a GPU hardware option in Space Settings (e.g. T4 small). The bundled `soy_diffusion.safetensors` is ~6.5 GB.

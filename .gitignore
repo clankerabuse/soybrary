@@ -78,6 +78,7 @@ session.json
 data/
 hf_upload/
 full_lora/
+full_ft/
 pilot_lora/
 hf_space/*.safetensors
 ubuntu@*

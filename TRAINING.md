@@ -1,4 +1,4 @@
-# Soybrary SDXL LoRA Training Pipeline
+# Soybrary SDXL Fine-Tune Training Pipeline
 
 ## What this project is
 
@@ -8,25 +8,27 @@
 - `data/soybooru.db` — SQLite index of all posts
 - These are also mirrored on **Cloudflare R2** (`soyjak-training` bucket) under `images/` and `metadata/` (legacy individual files), and packaged as tar shards under `datasets/soyjak-sdxl-{full,pilot}/` for fast Lambda pulls
 
-The goal is to train an **SDXL LoRA** on the **~105K** strictly validated static images so it **only** generates soyjak images (variants on demand). The first full run leaked generic SDXL output on soyjak-related prompts because captions had no shared style token.
+The goal is a **full SDXL fine-tune** (domain takeover, not a LoRA) on the **~105K** strictly validated static images so every generated image contains a soyjak. Extra objects/settings in a prompt are allowed; a soyjak-less image is not. The first LoRA run leaked generic SDXL output because an adapter cannot overwrite the base prior.
 
 ## Key design decisions (already made, don't revisit)
 
-- **Soyjak is the subject of every image.** Caption = `soyjak, {variant}, {subvariants}, {tags}`. `keep_tokens=2` pins the subject so extra tags (objects, settings, props) decorate a soyjak instead of replacing it. Prompting at inference must start with `soyjak`. A soyjak-less image (photo, landscape, unrelated character) is a failed sample.
-- **No class/regularization images.** Those would teach the model to still emit non-soyjaks. High caption dropout (empty-caption steps) is used instead so the unconditional prior stays on soyjaks.
+- **Full fine-tune via `sdxl_train.py`, not LoRA.** Train the UNet and both text encoders so SDXL's prior *becomes* soyjaks. A LoRA is a residual on top of SDXL and can still emit photos/landscapes.
+- **Soyjak is the subject of every image.** Caption = `soyjak, {variant}, 1boy, portrait, wojak, {subvariants}, {tags}`. `keep_tokens=2` pins `soyjak` + the lead variant. Extra tags decorate a soyjak instead of replacing it.
+- **Class-token hijack.** `1boy`, `portrait`, and `wojak` appear on every caption so person/portrait/wojak prompts resolve to soyjaks even without the trigger word.
+- **No class/regularization images.** Those would teach the model to still emit non-soyjaks. Caption dropout (empty-caption steps) keeps the unconditional prior on soyjaks.
 - **sd-scripts pinned to v0.10.6** (stable release before the v0.11.0 refactor that dropped June 12 2026). Do not upgrade.
 - **PyTorch 2.6.0 + CUDA 12.4** in an isolated venv (`~/sd-venv`).
 - **boto3/botocore pinned `<1.36.0`** to avoid Cloudflare R2 CRC32 checksum breakage introduced in 1.36.
 - **DreamBooth-style dataset** (image + `.txt` sidecar per image, flat directory). NOT the kohya fine-tuning `metadata_file` style — mixing these causes `voluptuous.error.MultipleInvalid`.
 - **SDXL base model:** `bdsqlsz/stable-diffusion-xl-base-1.0_fixvae_fp16` (fixed VAE). Do NOT set `vae = ""` in config — sd-scripts treats that as an empty HF repo id and crashes.
-- **Training target:** Lambda Labs **1× A100 40GB SXM** on **plain Ubuntu 22.04**. Slower than 2× H100 but far more reliable — multi-GPU H100 instances kept hitting fabric/CUDA init failures and burning balance on restarts. Expect ~8 h latent caching + ~12–24 h training for the full run (~20–30 h total). Run in tmux and detach; cost is predictable even if wall clock is long.
-- **Single-GPU defaults:** `NUM_GPUS=1`, `BATCH_SIZE=4`, `GRAD_ACCUM_STEPS=4` → effective batch 16 (same training dynamics as the old 2× H100 recipe). LR stays at `1.5e-4`. Override env vars only when debugging.
+- **Training target:** Lambda Labs **1× A100 40GB SXM** on **plain Ubuntu 22.04**. Slower than 2× H100 but far more reliable. Full FT: ~8 h latent cache + ~16–28 h training (~24–40 h total). Run in tmux and detach.
+- **Single-GPU defaults:** `NUM_GPUS=1`, `BATCH_SIZE=2`, `GRAD_ACCUM_STEPS=8` → effective batch 16. Adafactor + `fused_backward_pass`. OOM: `BATCH_SIZE=1 GRAD_ACCUM_STEPS=16`.
 - **SSH key:** `~/.ssh/soyjak-training-new.pem` (the `soyjak-training-new` Lambda key pair). Old key was `lambda-training.pem` (retired after pilot).
 
 ## Repository structure
 
 ```
-captions.py             # Shared trigger-aware caption builder (`soyjak, …`)
+captions.py             # Shared caption builder (soyjak + class hijack)
 build_dataset.py        # Phase 1: filter DB, build captions, emit JSONL manifest
 validate_images.py      # Pre-upload scan: strict image validation + quarantine
 image_validate.py       # Shared validation logic (local + Lambda prune)
@@ -40,14 +42,14 @@ train/
   setup_lambda.sh       # Run once on Lambda: installs Python 3.10 venv, torch, sd-scripts
   pull_data.sh          # Downloads tar shards from R2 and extracts them (captions baked in)
   gen_captions.py       # Legacy: only needed if rebuilding captions outside the shard pipeline
-  train_lora.sh         # Generates dataset.toml, prefixes trigger, downloads base model, launches training
-  ensure_trigger_captions.py  # Idempotent `soyjak, ` prefix on existing .txt sidecars (legacy shards)
-  push_model.sh         # Uploads trained LoRA .safetensors to R2 (must run before shutdown)
+  train_lora.sh         # Generates dataset.toml, applies caption recipe, launches sdxl_train.py (full FT)
+  ensure_trigger_captions.py  # Idempotent soyjak + 1boy/portrait/wojak recipe on existing .txt sidecars
+  push_model.sh         # Uploads trained ~6.5 GB SDXL checkpoints to R2 (must run before shutdown)
   prune_bad_images.py   # Drop corrupt images (auto-run by pull_data.sh + train_lora.sh)
   check_images.py       # Parallel bad-image scan (check-only; auto-run before training)
   check_images.sh       # Wrapper: MODE=pilot|full, uses sd-venv Python
-  config_pilot.toml     # Pilot run config: 2000 steps (~3 epochs over 10K images at eff. batch 16)
-  config.toml           # Full run config: 12000 steps (~1.8 epochs over 105K images at eff. batch 16)
+  config_pilot.toml     # Pilot full-FT: 1500 steps (~2.4 epochs over 10K images)
+  config.toml           # Full FT: 12000 steps (~1.8 epochs over 105K images)
   sample_prompts.txt    # Sample prompts for mid-training previews (tests variant separation)
   requirements-lock.txt # Pinned versions with rationale
 
@@ -113,10 +115,12 @@ datasets/soyjak-sdxl-pilot/            # packaged pilot dataset
   shards/shard_0000.tar
   ...
 
-models/soyjak-lora-sdxl-pilot-v2/      # v2 pilot LoRA (style-lock recipe)
-models/soyjak-lora-sdxl-v2/            # v2 full run LoRA (style-lock recipe)
-models/soyjak-lora-sdxl-pilot/         # v1 pilot (too general — keep for comparison)
-models/soyjak-lora-sdxl/               # v1 full run (too general — keep for comparison)
+models/soyjak-sdxl-ft-pilot/           # full-FT pilot checkpoint (~6.5 GB)
+models/soyjak-sdxl-ft/                 # full-FT production checkpoint (~6.5 GB)
+models/soyjak-lora-sdxl-pilot-v2/      # unused LoRA recipe (superseded)
+models/soyjak-lora-sdxl-v2/            # unused LoRA recipe (superseded)
+models/soyjak-lora-sdxl-pilot/         # v1 LoRA (too general — keep for comparison)
+models/soyjak-lora-sdxl/               # v1 LoRA (too general — keep for comparison)
 ```
 
 ## MODE system
@@ -129,10 +133,11 @@ All train/ scripts accept `MODE=pilot` (default) or `MODE=full`:
 | Images | 10,000 | 105,495 |
 | image_dir on Lambda | `/home/ubuntu/train_data_pilot` | `/home/ubuntu/train_data` |
 | Train config | `config_pilot.toml` | `config.toml` |
-| Steps (1×A100, eff. batch 16) | 3,000 (~4.8 epochs) | 18,000 (~2.7 epochs) |
-| LoRA | rank 64 / alpha 64 | rank 64 / alpha 64 |
-| R2 model prefix | `models/soyjak-lora-sdxl-pilot-v2` | `models/soyjak-lora-sdxl-v2` |
-| Expected time (1×A100) | ~2-3 hrs | ~24-36 hrs total |
+| Steps (1×A100, eff. batch 16) | 1,500 (~2.4 epochs) | 12,000 (~1.8 epochs) |
+| Trainer | `sdxl_train.py` full FT | `sdxl_train.py` full FT |
+| Checkpoint | ~6.5 GB SDXL | ~6.5 GB SDXL |
+| R2 model prefix | `models/soyjak-sdxl-ft-pilot` | `models/soyjak-sdxl-ft` |
+| Expected time (1×A100) | ~2-4 hrs | ~24-40 hrs total |
 
 ### Timing breakdown (1× A100, full run)
 
@@ -141,8 +146,8 @@ All train/ scripts accept `MODE=pilot` (default) or `MODE=full`:
 | Data pull | 30–60 min | Network-bound; same on any GPU |
 | Bad-image check + prune | 10–30 min | Parallel scan + delete; run `check_images.sh` anytime |
 | Latent cache | 5–8 hrs | Single-GPU VAE encode + disk write; ~105k images |
-| Training (18k steps) | 18–24 hrs | batch 4 × grad accum 4, effective batch 16 |
-| **Total** | **~24–36 hrs** | Slow but stable — run in tmux, detach, come back |
+| Training (12k steps) | 16–28 hrs | batch 2 × grad accum 8, Adafactor, full UNet+TE |
+| **Total** | **~24–40 hrs** | Slow but stable — run in tmux, detach, come back |
 
 ## Instance selection
 
@@ -157,7 +162,7 @@ multi-GPU hosts have been unreliable enough to waste balance on restarts.
 1. Instance type: **gpu_1x_a100_sxm4** (or equivalent 1× A100 40GB)
 2. Image: **Ubuntu 22.04** (plain — not Lambda Stack)
 3. SSH key: `soyjak-training-new`
-4. Disk: ≥ 150 GB (images ~38 GB + latent cache ~35 GB + checkpoints + headroom)
+4. Disk: ≥ 200 GB (images ~38 GB + latent cache ~35 GB + 6.5 GB checkpoints + headroom)
 
 After launching, sanity-check **before** running setup:
 
@@ -169,16 +174,17 @@ nvidia-smi -L   # expect: GPU 0: NVIDIA A100-SXM4-40GB
 
 | Setting | Value | Notes |
 |---|---|---|
-| `train_batch_size` | 4 | per step; fits 40 GB VRAM with grad checkpoint |
-| `gradient_accumulation_steps` | 4 | effective batch = 16 |
-| `max_train_steps` | 18,000 | ~2.7 epochs over 105,495 images (style lock; v1 was 12k / 1.8 epochs) |
-| `learning_rate` / `unet_lr` | 1.5e-4 | unchanged from 2× H100 recipe (same eff. batch) |
-| `text_encoder_lr` | 1.0e-4 | higher than v1 so the `soyjak` token binds |
-| `network_dim` / `network_alpha` | 64 / 64 | full LoRA scale at weight 1.0 so the subject overpowers SDXL |
-| `lr_warmup_steps` | 360 | ~2% of max_train_steps |
-| `save_every_n_steps` | 1,500 | 12 checkpoints total |
-| `sample_every_n_steps` | 1,500 | sample images at each checkpoint |
-| `keep_tokens` | 2 | pins `soyjak, <variant>` as the subject |
+| Trainer | `sdxl_train.py` | full UNet + TE1 + TE2; **not** `sdxl_train_network.py` |
+| `train_batch_size` | 2 | OOM → 1 |
+| `gradient_accumulation_steps` | 8 | effective batch = 16 (use 16 if `BATCH_SIZE=1`) |
+| `max_train_steps` | 12,000 | ~1.8 epochs over 105,495 images |
+| `learning_rate` | 1e-5 | UNet; ~10× lower than LoRA |
+| `learning_rate_te1` / `te2` | 5e-6 | class-hijack needs TE training |
+| `optimizer_type` | Adafactor | fused_backward_pass; AdamW states of full UNet will not fit |
+| `lr_warmup_steps` | 240 | ~2% of max_train_steps |
+| `save_every_n_steps` | 3,000 | ~6.5 GB each; `save_last_n_steps=6000` keeps two |
+| `sample_every_n_steps` | 1,500 | includes class-hijack prompts (`1boy, portrait, crying`) |
+| `keep_tokens` | 2 | pins `soyjak, <variant>` |
 | `caption_dropout_rate` | 0.15 | empty-caption steps keep unconditional on soyjaks |
 
 ## Session history
@@ -213,19 +219,21 @@ nvidia-smi -L   # expect: GPU 0: NVIDIA A100-SXM4-40GB
 - `package_dataset.py --mode full` → 9 shards, 38.21 GB, **0 failed validation** during packaging
 - Uploaded to `datasets/soyjak-sdxl-full/` + `manifests/dataset.jsonl`
 - Cleaned up 7 stale shards (`shard_0009`–`shard_0015`) left over from an earlier packaging run in `data/package/full/shards/` — `upload_to_r2` uploads every `*.tar` in that dir, but `pull_data.sh` only downloads shards listed in `shard_manifest.json`
-- **Next:** launch fresh 1× A100 instance → `pull_data.sh` → `train_lora.sh` using the **v2 style-lock recipe** (do not reuse the v1 LoRA)
+- **Next:** launch fresh 1× A100 instance → `pull_data.sh` → `train_lora.sh` using the **full fine-tune recipe**
 
-### Session 6 — Soyjak-only style lock (Sep 2026)
-- Problem: v1 LoRA was too general. Soyjak-related prompts still produced non-soyjak images (SDXL prior leaking through).
-- Cause: no shared trigger. Captions started with variant names (`chudjak`, …) and `keep_tokens=1` only pinned that variant. Generic tags (`pink_hair`, `tears`, `4chan`) activated the base model instead of soyjak.
-- Fix:
-  - Prefix every caption with `soyjak` (`captions.py`); `keep_tokens=2` so soyjak stays the subject
-  - `caption_dropout_rate=0.15` so empty/unconditional steps stay on soyjaks; extra object tags still train
-  - Rank 64 / alpha 64, TE LR `1e-4`, 18k steps (~2.7 epochs)
-  - `ensure_trigger_captions.py` patches already-packed R2 shards in place — **no 38 GB re-upload required**
-  - Inference: start every prompt with `soyjak`. Load **UNet + text-encoder** LoRA (A1111/Forge/Comfy). The HF Space is UNet-only and will look weaker.
-  - Success check on samples: every preview contains a soyjak. Extra objects (bicycle, forest, snail, …) should appear *with* it, never instead of it.
-- Output prefix: `models/soyjak-lora-sdxl-v2` (v1 weights left in place for comparison)
+### Session 6 — Soyjak-only LoRA attempt (Sep 2026, superseded)
+- Problem: v1 LoRA was too general. Soyjak-related prompts still produced non-soyjak images.
+- Attempted LoRA subject-lock (trigger + rank 64 + dropout). Still an adapter on SDXL — cannot guarantee a soyjak in every image.
+- Superseded by Session 7.
+
+### Session 7 — Full SDXL fine-tune + class hijack (Sep 2026)
+- Switch trainer from `sdxl_train_network.py` (LoRA) to `sdxl_train.py` (full UNet + TE1 + TE2).
+- Caption recipe: `soyjak, <variant>, 1boy, portrait, wojak, <tags>`. `keep_tokens=2`. Class tokens hijack person/portrait/wojak.
+- Adafactor, `learning_rate=1e-5`, TE `5e-6`, batch 2 × accum 8, 12k steps (~1.8 epochs). Checkpoints ~6.5 GB.
+- `ensure_trigger_captions.py` still patches existing R2 shards in place — **no 38 GB re-upload**.
+- Inference: load the full checkpoint as the SDXL base (A1111/Forge/Comfy/diffusers `from_single_file`). No LoRA weight.
+- Success check: every sample contains a soyjak, including the `1boy, portrait, crying` and `wojak, smiling` lines. Extra objects appear *with* it.
+- Output prefix: `models/soyjak-sdxl-ft`
 
 ## Known issues and fixes
 
@@ -240,7 +248,9 @@ nvidia-smi -L   # expect: GPU 0: NVIDIA A100-SXM4-40GB
 9. **Lambda Stack 2× H100 SXM — Fabric State stuck "In Progress" / CUDA error 802** — Driver/FM version mismatch in Lambda Stack image. FM reports "Pre-NVL5 / Nothing to do" and exits; GPUs never leave In Progress. Not fixable by reboot or FM config. Fix: use plain Ubuntu 22.04 instead.
 10. **Corrupt/truncated images crash training** — sd-scripts dies on bad files during latent caching. Validation now runs the full training load path (EXIF transpose, RGB convert, bucket downscale, pixel read, re-encode), not just Pillow `verify()`. Use `validate_images.py` locally before packaging; `build_dataset.py --validate-images` excludes bad files from the manifest; `package_dataset.py` re-checks by default; `prune_bad_images.py` is a last-resort safety net on Lambda. `check_images.py` runs a parallel pre-flight scan and a post-prune `--fail` verify before training starts. Override max size with `MAX_LONG_SIDE=0` or `CHECK_IMAGES=0`. Rebuild manifests after quarantining bad files.
 11. **Stale shards uploaded to R2** — `package_dataset.py` writes new shards into `data/package/full/shards/` but does not delete old `shard_*.tar` files. `upload_to_r2` then uploads every `*.tar` in that directory. `pull_data.sh` is safe (it reads `shard_manifest.json`), but stale shards waste R2 storage. **Fix:** before re-packaging, `rm data/package/full/shards/shard_*.tar` (or delete orphans manually). To remove stale objects from R2 after the fact, delete keys under `datasets/soyjak-sdxl-full/shards/` that are not listed in `shard_manifest.json`.
-12. **v1 LoRA too general / non-soyjak output** — Captions had no shared subject token, so generic tags fell through to SDXL and produced images with no soyjak in them. Extra objects in a prompt are fine; a soyjak-less image is not. Fixed in the v2 recipe: `soyjak` subject on every caption, `keep_tokens=2`, 15% caption dropout, rank 64 / alpha 64. Re-training is required. Existing R2 shards do **not** need a rebuild — `pull_data.sh` / `train_lora.sh` prefix `soyjak, ` onto extracted `.txt` files.
+12. **v1 LoRA too general / non-soyjak output** — An adapter cannot overwrite SDXL's prior. v2 LoRA subject-lock was still not a guarantee. Current recipe is a **full fine-tune** (`sdxl_train.py`) plus class-token hijack (`1boy`, `portrait`, `wojak`). Existing R2 shards do **not** need a rebuild — `pull_data.sh` / `train_lora.sh` rewrite extracted `.txt` files in place.
+13. **Full-FT OOM on 1× A100** — Default is batch 2 + Adafactor + `fused_backward_pass`. If it OOMs: `BATCH_SIZE=1 GRAD_ACCUM_STEPS=16`. Do not switch back to AdamW8bit for the full UNet.
+14. **Checkpoint disk** — Each save is ~6.5 GB. `save_last_n_steps=6000` keeps two plus the final. Need ≥ 200 GB instance disk. Push to R2 before terminating.
 
 ---
 
@@ -354,7 +364,8 @@ MODE=full bash train/pull_data.sh      # ~30-60 min
 # Optional: parallel bad-image scan without starting training
 MODE=full bash train/check_images.sh
 
-MODE=full bash train/train_lora.sh     # ~20-30 hrs on 1× A100 (latent cache + training)
+MODE=full bash train/train_lora.sh     # full FT, ~24-40 hrs on 1× A100 (latent cache + training)
+# OOM: BATCH_SIZE=1 GRAD_ACCUM_STEPS=16 MODE=full bash train/train_lora.sh
 
 # Detach: Ctrl-b d   |   Reattach: TERM=xterm-256color tmux attach -t training
 ```
@@ -362,11 +373,11 @@ MODE=full bash train/train_lora.sh     # ~20-30 hrs on 1× A100 (latent cache + 
 ### On the instance — push model before terminating
 ```bash
 MODE=full bash train/push_model.sh
-# Uploads all .safetensors under /home/ubuntu/out/ to r2://soyjak-training/models/soyjak-lora-sdxl-v2/
+# Uploads all .safetensors under /home/ubuntu/out/ to r2://soyjak-training/models/soyjak-sdxl-ft/
 ```
 
-### Local — download the trained LoRA
+### Local — download the trained checkpoint
 ```bash
 cd /path/to/soybrary
-.venv/bin/python r2_sync.py download --prefix models/soyjak-lora-sdxl-v2 --dest ./full_lora
+.venv/bin/python r2_sync.py download --prefix models/soyjak-sdxl-ft --dest ./full_ft
 ```

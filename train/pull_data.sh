@@ -51,8 +51,8 @@ if [ "$img_count" -ne "$txt_count" ]; then
     echo "WARNING: image/caption count mismatch — re-run package_dataset.py to rebuild shards" >&2
 fi
 
-# --- 3. Pin the soyjak style trigger on legacy variant-first captions --------
-echo "==> Prefixing caption sidecars with soyjak style trigger"
+# --- 3. Apply soyjak + class-hijack caption recipe on legacy shards ---------
+echo "==> Applying soyjak + class-hijack caption recipe"
 python "$REPO_DIR/train/ensure_trigger_captions.py" "$TRAIN_DATA"
 
 # --- 4. Drop corrupt / oversized images ------------------------------------

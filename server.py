@@ -48,6 +48,9 @@ IMMUTABLE_CACHE = {"Cache-Control": "public, max-age=31536000, immutable"}
 # Global scrape job manager
 scrape_job: Optional[ScrapeJob] = None
 scrape_event_queues: list[asyncio.Queue] = []
+# Held module-side: the event loop only keeps weak references to tasks, and a
+# scrape that gets garbage collected mid-run is a very confusing bug.
+_scrape_task: Optional[asyncio.Task] = None
 _event_forwarder: Optional[asyncio.Task] = None
 
 SSE_QUEUE_LIMIT = 500
@@ -96,7 +99,7 @@ def root():
 
 @app.get("/media/{post_id}.{extension}")
 def get_media_with_extension(post_id: int, extension: str):
-    found = find_media(post_id, extension, lookup_db=False) or find_media(post_id, extension)
+    found = find_media(post_id, extension, lookup_db=False)
     if found is None:
         raise HTTPException(status_code=404, detail="Media not found")
     return _media_response(found[0])
@@ -202,7 +205,7 @@ async def start_scrape(
     end_id: Optional[int] = Query(default=None),
     limit: Optional[int] = Query(default=None),
 ):
-    global scrape_job, _event_forwarder
+    global scrape_job, _scrape_task, _event_forwarder
     logger.info("Scrape start request received")
 
     if scrape_job and scrape_job.running:
@@ -223,7 +226,7 @@ async def start_scrape(
             main_loop=asyncio.get_running_loop(),
         )
 
-        task = asyncio.create_task(scrape_job.run())
+        task = _scrape_task = asyncio.create_task(scrape_job.run())
         if _event_forwarder is not None:
             _event_forwarder.cancel()
         _event_forwarder = asyncio.create_task(_forward_events(progress_queue))

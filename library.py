@@ -434,9 +434,11 @@ def _thumbnail_size() -> tuple[int, int]:
 
 def _write_thumbnail(img: Image.Image, dest: Path) -> bool:
     """Downscale and save atomically so a crash can't leave a broken thumbnail."""
-    img.thumbnail(_thumbnail_size(), Image.LANCZOS, reducing_gap=2.0)
+    # Palette and alpha modes fall back to nearest-neighbour when resampled, so
+    # flatten first and let LANCZOS do the downscale.
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
+    img.thumbnail(_thumbnail_size(), Image.LANCZOS, reducing_gap=2.0)
     tmp_fd, tmp_name = tempfile.mkstemp(suffix=".jpg", dir=str(THUMBNAILS_DIR))
     os.close(tmp_fd)
     try:

@@ -42,19 +42,30 @@ let autocompleteRequestId = 0;
 
 const LIMIT = 50;
 
+/* Animated previews are only fetched once they are near the viewport — a grid
+   page holds 50 posts and the originals are far heavier than the thumbnails. */
 const previewObserver = new IntersectionObserver(
     (entries) => {
         for (const entry of entries) {
-            const video = entry.target;
+            const media = entry.target;
             if (entry.isIntersecting) {
-                video.play().catch(() => {});
-            } else {
-                video.pause();
+                activatePreview(media);
+            } else if (media.tagName === 'VIDEO') {
+                media.pause();
             }
         }
     },
-    { threshold: 0.15, rootMargin: '80px' }
+    { threshold: 0.15, rootMargin: '200px' }
 );
+
+function activatePreview(media) {
+    const full = media.dataset.previewSrc;
+    if (full) {
+        delete media.dataset.previewSrc;
+        media.src = full;
+    }
+    if (media.tagName === 'VIDEO') media.play().catch(() => {});
+}
 
 /* ─── Toast ───────────────────────────────────────────────────────────────────── */
 function showToast(message, type = 'info', duration = 4000) {
@@ -136,8 +147,19 @@ function createMediaWrap(post) {
 }
 
 function removeFailedItem(div, mediaEl) {
-    if (mediaEl?.tagName === 'VIDEO') previewObserver.unobserve(mediaEl);
+    if (mediaEl) previewObserver.unobserve(mediaEl);
     div.remove();
+}
+
+function createGridImage(post) {
+    const img = document.createElement('img');
+    img.className = 'masonry-media';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.src = post.thumbnail_url;
+    img.alt = post.tags || '';
+    bindMediaLoaded(img);
+    return img;
 }
 
 function createItem(post) {
@@ -149,37 +171,32 @@ function createItem(post) {
     if (post.is_video) {
         const video = document.createElement('video');
         video.className = 'masonry-media';
-        video.src = post.image_url;
+        video.dataset.previewSrc = post.image_url;
         video.poster = post.thumbnail_url;
         video.muted = true;
         video.loop = true;
         video.playsInline = true;
-        video.preload = 'metadata';
+        video.preload = 'none';
         video.addEventListener('error', () => removeFailedItem(div, video));
         bindMediaLoaded(video);
         wrap.appendChild(video);
         previewObserver.observe(video);
     } else if (post.is_gif || (post.extension || '').toLowerCase() === 'gif') {
-        const img = document.createElement('img');
-        img.className = 'masonry-media';
-        img.loading = 'lazy';
-        img.src = post.image_url;
-        img.alt = post.tags || '';
+        // Start on the thumbnail and swap in the animation once it is on screen.
+        const img = createGridImage(post);
+        img.dataset.previewSrc = post.image_url;
         img.addEventListener('error', () => {
-            img.onerror = null;
-            img.src = post.thumbnail_url;
-            img.onerror = () => removeFailedItem(div, img);
+            if (img.src.endsWith(post.thumbnail_url)) {
+                removeFailedItem(div, img);
+            } else {
+                img.src = post.thumbnail_url;
+            }
         });
-        bindMediaLoaded(img);
         wrap.appendChild(img);
+        previewObserver.observe(img);
     } else {
-        const img = document.createElement('img');
-        img.className = 'masonry-media';
-        img.loading = 'lazy';
-        img.src = post.thumbnail_url;
-        img.alt = post.tags || '';
+        const img = createGridImage(post);
         img.addEventListener('error', () => removeFailedItem(div, img));
-        bindMediaLoaded(img);
         wrap.appendChild(img);
     }
 
@@ -282,6 +299,8 @@ async function loadPosts(page = 1) {
     currentPage = page;
     emptyState.classList.add('hidden');
     paginationEl.classList.add('hidden');
+    // Drop observations for the outgoing page so they don't pin removed nodes.
+    previewObserver.disconnect();
     grid.innerHTML = '';
     loadingIndicator.classList.remove('hidden');
 
@@ -861,22 +880,33 @@ async function handleNewPost(postId) {
 }
 
 /* ─── Scrape status poll ──────────────────────────────────────────────────────── */
+/* Progress arrives over SSE; polling only covers a scrape started elsewhere
+   (another tab, the CLI) or an SSE drop, so it idles when nothing is running. */
+let statusPollTimer = null;
+
 async function checkScrapeStatus() {
     try {
         const res = await fetch('/api/scrape/status');
         const data = await res.json();
-        if (data.running) {
-            setScrapeRunning(true);
-            setScrapeStatus(data.message || `Scraping ID ${data.current_id}…`);
-        } else if (isScraping) {
-            setScrapeRunning(false);
-        }
+        setScrapeRunning(Boolean(data.running));
     } catch {
         // silently ignore poll errors
     }
+    scheduleStatusPoll();
 }
+
+function scheduleStatusPoll() {
+    clearTimeout(statusPollTimer);
+    if (document.hidden) return;
+    statusPollTimer = setTimeout(checkScrapeStatus, isScraping ? 2000 : 15000);
+}
+
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) clearTimeout(statusPollTimer);
+    else checkScrapeStatus();
+});
 
 /* ─── Init ────────────────────────────────────────────────────────────────────── */
 loadPosts(1);
 connectSSE();
-setInterval(checkScrapeStatus, 2000);
+checkScrapeStatus();

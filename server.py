@@ -15,7 +15,6 @@ import library
 import search
 from library import (
     IMAGES_DIR,
-    THUMBNAILS_DIR,
     VIDEOS_DIR,
     config,
     ensure_thumbnail,

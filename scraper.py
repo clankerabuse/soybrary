@@ -17,29 +17,25 @@ from PIL import Image
 # Import playwright
 from playwright.async_api import async_playwright
 
-import library
 from library import (
-    DATA_DIR,
     DB_PATH,
-    DEFAULT_CONFIG,
     IMAGES_DIR,
     METADATA_DIR,
     VIDEOS_DIR,
     Database,
     config,
     is_video_extension,
-    load_config,
     safe_extension,
     thumbnail_from_bytes,
     thumbnail_from_video,
 )
 
-CONFIG_FILE = library.CONFIG_FILE
-
 logger = logging.getLogger(__name__)
 
 BOORU_ORIGIN = "https://soybooru.com"
 FALLBACK_LATEST_ID = 245000
+# Time given to the landing page to clear Turnstile and the proof-of-work check.
+ACTIVATION_WAIT_SECONDS = 5
 STATS_TEMPLATE = {"completed": 0, "skipped": 0, "empty": 0, "failed": 0}
 
 db = Database(DB_PATH)
@@ -449,6 +445,13 @@ class ScrapeJob:
 
     async def _emit(self, event_type, data=None):
         event = {"type": event_type, "data": data or {}}
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is self.main_loop:
+            await self.progress_queue.put(event)
+            return
         # The scrape runs on its own event loop; hand events back to the server's.
         try:
             asyncio.run_coroutine_threadsafe(self.progress_queue.put(event), self.main_loop)
@@ -533,6 +536,8 @@ class ScrapeJob:
         thread = threading.Thread(target=_run_playwright_thread, daemon=True)
         thread.start()
         await asyncio.to_thread(done_event.wait)
+        # Let events the scrape thread handed over land before the summary.
+        await asyncio.sleep(0)
 
         if error_holder[0]:
             await self._emit("error", {"message": str(error_holder[0])})
@@ -550,7 +555,7 @@ class ScrapeJob:
             try:
                 await self._emit("status", {"message": "Activating Turnstile & PoW..."})
                 await page.goto(f"{BOORU_ORIGIN}/booru", timeout=60000)
-                await asyncio.sleep(5)
+                await asyncio.sleep(ACTIVATION_WAIT_SECONDS)
 
                 scraper = Scraper(page)
 
@@ -660,7 +665,7 @@ async def main():
         print(f"Navigating to {BOORU_ORIGIN}/booru (Turnstile & PoW activation)...")
         await page.goto(f"{BOORU_ORIGIN}/booru", timeout=60000)
         # Wait for page scripts to load and verify
-        await asyncio.sleep(5)
+        await asyncio.sleep(ACTIVATION_WAIT_SECONDS)
 
         scraper = Scraper(page)
 

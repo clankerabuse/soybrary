@@ -579,6 +579,149 @@ class TestScrapeJob(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(job.get_status()["cancelled"])
 
 
+class FakePage:
+    """Stands in for the Playwright page a scrape drives."""
+
+    def __init__(self, posts, latest_id):
+        self.posts = posts
+        self.latest_id = latest_id
+
+    async def goto(self, url, timeout=None):
+        return None
+
+    async def content(self):
+        return f'<a href="/post/view/{self.latest_id}">latest</a>'
+
+    async def evaluate(self, script, url):
+        import base64
+        post_id = int(url.rstrip("/file").rsplit("/", 1)[-1])
+        if post_id not in self.posts:
+            return {"status": 404, "data": None}
+        if url.endswith("/file"):
+            return {"status": 200, "data": base64.b64encode(_real_image("PNG")).decode()}
+        return {"status": 200, "data": self.posts[post_id]}
+
+
+def _fake_playwright(page):
+    browser = MagicMock()
+    browser.close = AsyncMock()
+    context = MagicMock()
+    context.new_page = AsyncMock(return_value=page)
+    browser.new_context = AsyncMock(return_value=context)
+    chromium = MagicMock()
+    chromium.launch = AsyncMock(return_value=browser)
+
+    driver = MagicMock()
+    driver.chromium = chromium
+    manager = MagicMock()
+    manager.__aenter__ = AsyncMock(return_value=driver)
+    manager.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=manager), browser
+
+
+class TestScrapeJobEndToEnd(unittest.IsolatedAsyncioTestCase):
+    """Drive a whole scrape session with a stubbed browser."""
+
+    def setUp(self):
+        self._orig_db = scraper.db
+        self.db = library.Database(":memory:")
+        scraper.db = self.db
+        self._orig_config = dict(scraper.config)
+        scraper.config.update({"delay_ms": 0, "concurrency": 2,
+                               "pregenerate_thumbnails": False})
+        self.ids = [7001, 7002, 7003]
+        self.posts = {
+            pid: {
+                "id": pid,
+                "mimeType": "image/png",
+                "originalFileName": f"{pid}.png",
+                "width": 10, "height": 10,
+                "uploadedAt": "2026-01-01T00:00:00Z",
+                "uploader": {"userName": "anon"},
+                "tags": [{"name": "gapejak", "category": "general"}],
+            }
+            for pid in self.ids[:2]  # the third id is a gap in the catalog
+        }
+
+    def tearDown(self):
+        scraper.db = self._orig_db
+        self.db.close()
+        scraper.config.clear()
+        scraper.config.update(self._orig_config)
+        for pid in self.ids:
+            (library.IMAGES_DIR / f"{pid}.png").unlink(missing_ok=True)
+            (library.METADATA_DIR / f"{pid}.json").unlink(missing_ok=True)
+
+    async def _run(self, **kwargs):
+        page = FakePage(self.posts, latest_id=self.ids[-1])
+        fake, browser = _fake_playwright(page)
+        queue = asyncio.Queue()
+        job = scraper.ScrapeJob(progress_queue=queue,
+                                main_loop=asyncio.get_running_loop(), **kwargs)
+        with patch.object(scraper, "async_playwright", fake), \
+             patch.object(scraper, "ACTIVATION_WAIT_SECONDS", 0):
+            await asyncio.wait_for(job.run(), timeout=30)
+
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        return job, events, browser
+
+    async def test_scrapes_a_range(self):
+        job, events, browser = await self._run(start_id=self.ids[0], end_id=self.ids[-1])
+
+        self.assertEqual(job.stats, {"completed": 2, "empty": 1, "failed": 0, "skipped": 0})
+        self.assertFalse(job.running)
+        for pid in self.ids[:2]:
+            self.assertEqual(self.db.get_post_status(pid), "completed")
+            self.assertTrue((library.IMAGES_DIR / f"{pid}.png").exists())
+        self.assertEqual(self.db.get_post_status(self.ids[-1]), "empty")
+        browser.close.assert_awaited()
+
+    async def test_emits_progress_events(self):
+        _, events, _ = await self._run(start_id=self.ids[0], end_id=self.ids[-1])
+        kinds = [e["type"] for e in events]
+        self.assertEqual(kinds[-1], "complete")
+        self.assertEqual(kinds.count("post_done"), 3)
+        self.assertIn("status", kinds)
+        self.assertNotIn("error", kinds)
+
+    async def test_second_run_skips_finished_work(self):
+        await self._run(start_id=self.ids[0], end_id=self.ids[-1])
+        job, events, _ = await self._run(start_id=self.ids[0], end_id=self.ids[-1])
+
+        self.assertEqual(sum(job.stats.values()), 0)
+        self.assertEqual(job.total_queue, 0)
+        self.assertTrue(any("No new posts" in e["data"].get("message", "")
+                            for e in events if e["type"] == "status"))
+
+    async def test_limit_caps_the_queue(self):
+        job, _, _ = await self._run(start_id=self.ids[0], end_id=self.ids[-1], limit=1)
+        self.assertEqual(job.total_queue, 1)
+        self.assertEqual(sum(job.stats.values()), 1)
+
+    async def test_detects_the_latest_id(self):
+        job, _, _ = await self._run(start_id=self.ids[0])
+        self.assertEqual(job.end_id, self.ids[-1])
+
+    async def test_browser_failure_is_reported(self):
+        fake, _ = _fake_playwright(FakePage({}, 1))
+        fake.return_value.__aenter__ = AsyncMock(side_effect=RuntimeError("no browser"))
+        queue = asyncio.Queue()
+        job = scraper.ScrapeJob(start_id=1, end_id=2, progress_queue=queue,
+                                main_loop=asyncio.get_running_loop())
+        with patch.object(scraper, "async_playwright", fake):
+            await asyncio.wait_for(job.run(), timeout=30)
+
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        errors = [e for e in events if e["type"] == "error"]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("no browser", errors[0]["data"]["message"])
+        self.assertFalse(job.running)
+
+
 class TestScrapeDelay(unittest.TestCase):
     def test_jitter_stays_within_bounds(self):
         for _ in range(200):

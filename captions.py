@@ -2,14 +2,15 @@
 """
 Shared caption construction for Soybrary SDXL LoRA training.
 
-Every caption starts with a fixed style trigger (`soyjak`) so the LoRA learns
-one locked concept instead of scattering across variant names. Generic tags
-like `pink_hair` then modify a soyjak, rather than pulling SDXL back to
-photographs / unrelated drawings.
+Every caption starts with a locked subject token (`soyjak`). Extra tags
+(objects, settings, props) are allowed and expected — they decorate a soyjak
+rather than replacing it. The failure mode we are training against is an
+image with no soyjak in it at all (photo, landscape, unrelated character).
 
-kohya `keep_tokens` should pin at least the trigger (and preferably the
-leading variant): keep_tokens=2 with captions of the form
-`soyjak, <variant>, <tags...>`.
+kohya `keep_tokens=2` pins `soyjak, <variant>` so shuffle/tag-dropout cannot
+drop the subject. `caption_dropout_rate` trains some steps with an empty
+caption so the unconditional prior stays on soyjaks even when the prompt is
+mostly about something else.
 """
 
 from collections import Counter

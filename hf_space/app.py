@@ -15,7 +15,8 @@ DEFAULT_PROMPT = (
 )
 DEFAULT_NEGATIVE = (
     "photorealistic, photo, photograph, realistic, 3d, render, scenery, "
-    "landscape, painting, anime screenshot, watermark, text, blurry, low quality"
+    "landscape, no humans, empty scene, painting, anime screenshot, "
+    "watermark, text, blurry, low quality"
 )
 
 pipe = None
@@ -109,9 +110,10 @@ def generate(
 with gr.Blocks(title="soy_diffusion") as demo:
     gr.Markdown(
         "# soy_diffusion\n"
-        "SDXL LoRA demo. **Always soyjak.** Start prompts with `soyjak`, then a "
-        "variant (`feraljak`, `chudjak`, `cobson`, …) and booru tags. The trigger "
-        "is prepended automatically if you leave it out."
+        "SDXL LoRA demo. **Every image should contain a soyjak.** Extra objects "
+        "and settings in the prompt are fine — they appear *with* the soyjak, "
+        "not instead of it. Start with `soyjak`, then a variant and any other tags. "
+        "The trigger is prepended automatically if you leave it out."
     )
     with gr.Row():
         with gr.Column():

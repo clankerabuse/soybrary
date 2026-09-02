@@ -30,7 +30,7 @@ save_last_n_steps = 3000
 # --- LoRA network ---
 network_module = "networks.lora"
 network_dim = 64
-network_alpha = 32
+network_alpha = 64
 
 # --- precision / memory (1× A100 40GB) ---
 mixed_precision = "bf16"

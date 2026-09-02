@@ -201,7 +201,7 @@ Include at minimum:
 | Field | Value |
 |---|---|
 | Base model (training) | `bdsqlsz/stable-diffusion-xl-base-1.0_fixvae_fp16` |
-| LoRA type | kohya `networks.lora`, rank 64 / alpha 32 (v2 style lock) |
+| LoRA type | kohya `networks.lora`, rank 64 / alpha 64 (v2 subject lock) |
 | Training | ~105k images, 18k steps, effective batch 16 |
 | Prompting | **Always** start with `soyjak`, then a variant (`feraljak`, `chudjak`, …) |
 | License | Your choice (set on repo) |
@@ -240,7 +240,7 @@ Include at minimum:
 ### HF deploy — v2 soyjak-only (pending retraining)
 
 - After the v2 Lambda run, publish `models/soyjak-lora-sdxl-v2/soyjak-lora-sdxl-v2.safetensors` as `soy_diffusion.safetensors`
-- Prompt card: always `soyjak, <variant>, <tags>`. LoRA strength 1.0. Negative: photoreal / scenery / 3d
+- Prompt card: always `soyjak, <variant>, <tags>`. Extra objects/settings are allowed; a soyjak-less image is a failure. LoRA strength 1.0. Negative: photoreal / scenery / no humans / 3d
 - Prefer Forge/A1111/Comfy for judging style lock (full TE+UNet). Space remains UNet-only.
 - Local paths gitignored: `hf_upload/`, `hf_space/*.safetensors`
 

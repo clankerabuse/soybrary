@@ -12,8 +12,8 @@ The goal is to train an **SDXL LoRA** on the **~105K** strictly validated static
 
 ## Key design decisions (already made, don't revisit)
 
-- **Fixed style trigger: `soyjak`.** Every caption is `soyjak, {variant}, {subvariants}, {tags}`. `keep_tokens=2` pins the trigger and the lead variant so shuffle/dropout cannot drop the style lock. Prompting at inference must also start with `soyjak`.
-- **No class/regularization images.** Those would teach the model to still emit non-soyjaks. Caption dropout (empty-caption steps) is used instead so the unconditional stays on-distribution.
+- **Soyjak is the subject of every image.** Caption = `soyjak, {variant}, {subvariants}, {tags}`. `keep_tokens=2` pins the subject so extra tags (objects, settings, props) decorate a soyjak instead of replacing it. Prompting at inference must start with `soyjak`. A soyjak-less image (photo, landscape, unrelated character) is a failed sample.
+- **No class/regularization images.** Those would teach the model to still emit non-soyjaks. High caption dropout (empty-caption steps) is used instead so the unconditional prior stays on soyjaks.
 - **sd-scripts pinned to v0.10.6** (stable release before the v0.11.0 refactor that dropped June 12 2026). Do not upgrade.
 - **PyTorch 2.6.0 + CUDA 12.4** in an isolated venv (`~/sd-venv`).
 - **boto3/botocore pinned `<1.36.0`** to avoid Cloudflare R2 CRC32 checksum breakage introduced in 1.36.
@@ -130,7 +130,7 @@ All train/ scripts accept `MODE=pilot` (default) or `MODE=full`:
 | image_dir on Lambda | `/home/ubuntu/train_data_pilot` | `/home/ubuntu/train_data` |
 | Train config | `config_pilot.toml` | `config.toml` |
 | Steps (1×A100, eff. batch 16) | 3,000 (~4.8 epochs) | 18,000 (~2.7 epochs) |
-| LoRA | rank 64 / alpha 32 | rank 64 / alpha 32 |
+| LoRA | rank 64 / alpha 64 | rank 64 / alpha 64 |
 | R2 model prefix | `models/soyjak-lora-sdxl-pilot-v2` | `models/soyjak-lora-sdxl-v2` |
 | Expected time (1×A100) | ~2-3 hrs | ~24-36 hrs total |
 
@@ -174,12 +174,12 @@ nvidia-smi -L   # expect: GPU 0: NVIDIA A100-SXM4-40GB
 | `max_train_steps` | 18,000 | ~2.7 epochs over 105,495 images (style lock; v1 was 12k / 1.8 epochs) |
 | `learning_rate` / `unet_lr` | 1.5e-4 | unchanged from 2× H100 recipe (same eff. batch) |
 | `text_encoder_lr` | 1.0e-4 | higher than v1 so the `soyjak` token binds |
-| `network_dim` / `network_alpha` | 64 / 32 | v1 was 32/16 — too weak to overpower SDXL's prior |
+| `network_dim` / `network_alpha` | 64 / 64 | full LoRA scale at weight 1.0 so the subject overpowers SDXL |
 | `lr_warmup_steps` | 360 | ~2% of max_train_steps |
 | `save_every_n_steps` | 1,500 | 12 checkpoints total |
 | `sample_every_n_steps` | 1,500 | sample images at each checkpoint |
-| `keep_tokens` | 2 | pins `soyjak, <variant>` |
-| `caption_dropout_rate` | 0.08 | empty-caption steps keep unconditional on-style |
+| `keep_tokens` | 2 | pins `soyjak, <variant>` as the subject |
+| `caption_dropout_rate` | 0.15 | empty-caption steps keep unconditional on soyjaks |
 
 ## Session history
 
@@ -219,11 +219,12 @@ nvidia-smi -L   # expect: GPU 0: NVIDIA A100-SXM4-40GB
 - Problem: v1 LoRA was too general. Soyjak-related prompts still produced non-soyjak images (SDXL prior leaking through).
 - Cause: no shared trigger. Captions started with variant names (`chudjak`, …) and `keep_tokens=1` only pinned that variant. Generic tags (`pink_hair`, `tears`, `4chan`) activated the base model instead of soyjak.
 - Fix:
-  - Prefix every caption with `soyjak` (`captions.py`); `keep_tokens=2`
-  - `caption_dropout_rate=0.08` + `caption_tag_dropout_rate=0.15` so trigger-alone (and even empty caption) stays on-style
-  - Rank 64 / alpha 32, TE LR `1e-4`, 18k steps (~2.7 epochs)
+  - Prefix every caption with `soyjak` (`captions.py`); `keep_tokens=2` so soyjak stays the subject
+  - `caption_dropout_rate=0.15` so empty/unconditional steps stay on soyjaks; extra object tags still train
+  - Rank 64 / alpha 64, TE LR `1e-4`, 18k steps (~2.7 epochs)
   - `ensure_trigger_captions.py` patches already-packed R2 shards in place — **no 38 GB re-upload required**
   - Inference: start every prompt with `soyjak`. Load **UNet + text-encoder** LoRA (A1111/Forge/Comfy). The HF Space is UNet-only and will look weaker.
+  - Success check on samples: every preview contains a soyjak. Extra objects (bicycle, forest, snail, …) should appear *with* it, never instead of it.
 - Output prefix: `models/soyjak-lora-sdxl-v2` (v1 weights left in place for comparison)
 
 ## Known issues and fixes
@@ -239,7 +240,7 @@ nvidia-smi -L   # expect: GPU 0: NVIDIA A100-SXM4-40GB
 9. **Lambda Stack 2× H100 SXM — Fabric State stuck "In Progress" / CUDA error 802** — Driver/FM version mismatch in Lambda Stack image. FM reports "Pre-NVL5 / Nothing to do" and exits; GPUs never leave In Progress. Not fixable by reboot or FM config. Fix: use plain Ubuntu 22.04 instead.
 10. **Corrupt/truncated images crash training** — sd-scripts dies on bad files during latent caching. Validation now runs the full training load path (EXIF transpose, RGB convert, bucket downscale, pixel read, re-encode), not just Pillow `verify()`. Use `validate_images.py` locally before packaging; `build_dataset.py --validate-images` excludes bad files from the manifest; `package_dataset.py` re-checks by default; `prune_bad_images.py` is a last-resort safety net on Lambda. `check_images.py` runs a parallel pre-flight scan and a post-prune `--fail` verify before training starts. Override max size with `MAX_LONG_SIDE=0` or `CHECK_IMAGES=0`. Rebuild manifests after quarantining bad files.
 11. **Stale shards uploaded to R2** — `package_dataset.py` writes new shards into `data/package/full/shards/` but does not delete old `shard_*.tar` files. `upload_to_r2` then uploads every `*.tar` in that directory. `pull_data.sh` is safe (it reads `shard_manifest.json`), but stale shards waste R2 storage. **Fix:** before re-packaging, `rm data/package/full/shards/shard_*.tar` (or delete orphans manually). To remove stale objects from R2 after the fact, delete keys under `datasets/soyjak-sdxl-full/shards/` that are not listed in `shard_manifest.json`.
-12. **v1 LoRA too general / non-soyjak output** — Captions had no shared style token, so generic tags fell through to SDXL. Fixed in the v2 recipe: `soyjak` trigger on every caption, `keep_tokens=2`, caption dropout, rank 64, more steps. Re-training is required; the old weights cannot be "prompted into" soyjak-only. Existing R2 shards do **not** need a rebuild — `pull_data.sh` / `train_lora.sh` prefix `soyjak, ` onto extracted `.txt` files. Rebuild manifests only if you want the trigger baked into a future package.
+12. **v1 LoRA too general / non-soyjak output** — Captions had no shared subject token, so generic tags fell through to SDXL and produced images with no soyjak in them. Extra objects in a prompt are fine; a soyjak-less image is not. Fixed in the v2 recipe: `soyjak` subject on every caption, `keep_tokens=2`, 15% caption dropout, rank 64 / alpha 64. Re-training is required. Existing R2 shards do **not** need a rebuild — `pull_data.sh` / `train_lora.sh` prefix `soyjak, ` onto extracted `.txt` files.
 
 ---
 

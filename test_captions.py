@@ -102,16 +102,28 @@ class TestTrainRecipe(unittest.TestCase):
     def test_dataset_toml_pins_trigger_and_dropout(self):
         text = Path("train/train_lora.sh").read_text(encoding="utf-8")
         self.assertIn("keep_tokens = 2", text)
-        self.assertIn("caption_dropout_rate = 0.08", text)
-        self.assertIn("caption_tag_dropout_rate = 0.15", text)
+        self.assertIn("caption_dropout_rate = 0.15", text)
+        self.assertIn("caption_tag_dropout_rate = 0.10", text)
         self.assertIn("ensure_trigger_captions.py", text)
 
     def test_full_config_is_v2_style_lock(self):
         text = Path("train/config.toml").read_text(encoding="utf-8")
         self.assertIn("network_dim = 64", text)
+        self.assertIn("network_alpha = 64", text)
         self.assertIn("max_train_steps = 18000", text)
         self.assertIn("output_name = \"soyjak-lora-sdxl-v2\"", text)
         self.assertIn("text_encoder_lr = 1.0e-4", text)
+
+    def test_sample_prompts_keep_soyjak_with_extra_objects(self):
+        text = Path("train/sample_prompts.txt").read_text(encoding="utf-8")
+        self.assertIn("soyjak, cobson, red bicycle, forest", text)
+        for line in text.splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            self.assertTrue(
+                line.startswith("soyjak"),
+                f"sample prompt missing soyjak subject: {line}",
+            )
 
 
 if __name__ == "__main__":

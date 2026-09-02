@@ -14,9 +14,9 @@ R2_SYNC="${R2_SYNC:-r2_sync.py}"
 # Pilot and full models go to distinct prefixes so they don't overwrite.
 MODE="${MODE:-pilot}"
 if [ "$MODE" = "pilot" ]; then
-  R2_MODEL_PREFIX="${R2_MODEL_PREFIX:-models/soyjak-lora-sdxl-pilot}"
+  R2_MODEL_PREFIX="${R2_MODEL_PREFIX:-models/soyjak-lora-sdxl-pilot-v2}"
 else
-  R2_MODEL_PREFIX="${R2_MODEL_PREFIX:-models/soyjak-lora-sdxl}"
+  R2_MODEL_PREFIX="${R2_MODEL_PREFIX:-models/soyjak-lora-sdxl-v2}"
 fi
 PUSH_HF="${PUSH_HF:-0}"
 

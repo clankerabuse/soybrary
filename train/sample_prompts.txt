@@ -1,7 +1,7 @@
-# TEMP: variance test — same specific prompt on every line; compare _00.._04 at each step.
+# Mid-training samples. Every prompt starts with the soyjak style trigger.
 # Format: prompt followed by kohya CLI-style flags.
-feraljak, screaming, snail, pink_hair, hammer_and_sickle, tears, 4chan --w 1024 --h 1024 --d 42 --s 28 --l 7
-feraljak, screaming, snail, pink_hair, hammer_and_sickle, tears, 4chan --w 1024 --h 1024 --d 42 --s 28 --l 7
-feraljak, screaming, snail, pink_hair, hammer_and_sickle, tears, 4chan --w 1024 --h 1024 --d 42 --s 28 --l 7
-feraljak, screaming, snail, pink_hair, hammer_and_sickle, tears, 4chan --w 1024 --h 1024 --d 42 --s 28 --l 7
-feraljak, screaming, snail, pink_hair, hammer_and_sickle, tears, 4chan --w 1024 --h 1024 --d 42 --s 28 --l 7
+soyjak, chudjak, looking_at_viewer --w 1024 --h 1024 --d 42 --s 28 --l 7
+soyjak, cobson, smiling --w 1024 --h 1024 --d 43 --s 28 --l 7
+soyjak, gapejak, screaming, tears --w 1024 --h 1024 --d 44 --s 28 --l 7
+soyjak, feraljak, screaming, snail, pink_hair, hammer_and_sickle, tears, 4chan --w 1024 --h 1024 --d 45 --s 28 --l 7
+soyjak --w 1024 --h 1024 --d 46 --s 28 --l 7

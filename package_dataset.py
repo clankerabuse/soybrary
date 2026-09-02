@@ -61,6 +61,7 @@ except ImportError:
     pass
 
 from image_validate import check_image_path
+from captions import TRIGGER_TOKEN, build_caption, ensure_trigger_prefix
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -75,34 +76,6 @@ TRANSFER_CONFIG = TransferConfig(
     max_concurrency=8,
     use_threads=True,
 )
-
-
-# ---------------------------------------------------------------------------
-# Caption helpers (mirrors gen_captions.py logic so metadata is baked in)
-# ---------------------------------------------------------------------------
-
-def _dedup_preserve_order(items):
-    seen = set()
-    out = []
-    for item in items:
-        if item is None:
-            continue
-        tag = str(item).strip()
-        if not tag:
-            continue
-        key = tag.lower()
-        if key not in seen:
-            seen.add(key)
-            out.append(tag)
-    return out
-
-
-def _build_caption_from_meta(meta):
-    parts = []
-    parts.extend(meta.get("variants") or [])
-    parts.extend(meta.get("subvariants") or [])
-    parts.extend(meta.get("tags") or [])
-    return ", ".join(_dedup_preserve_order(parts))
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +201,8 @@ def package(manifest_path, out_dir, shard_size_gb, image_dir_on_instance, valida
                 bad_img += 1
                 continue
 
-        # Build caption: prefer manifest caption field, fall back to metadata file.
+        # Build caption: prefer manifest caption field, fall back to metadata.
+        # Always pin the soyjak trigger so legacy manifests still lock style.
         if rec.get("caption"):
             caption = rec["caption"]
         else:
@@ -238,12 +212,13 @@ def package(manifest_path, out_dir, shard_size_gb, image_dir_on_instance, valida
                 continue
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                caption = _build_caption_from_meta(meta)
+                caption = build_caption(meta)
             except Exception:
                 missing_meta += 1
                 continue
 
-        if not caption:
+        caption = ensure_trigger_prefix(caption)
+        if not caption or caption.strip().lower() == TRIGGER_TOKEN:
             missing_meta += 1
             continue
 

@@ -6,8 +6,8 @@ Reads each metadata/{id}.json and writes a matching {id}.txt caption sidecar
 into the image directory. kohya sd-scripts (DreamBooth-style) picks up the
 .txt file alongside the image automatically.
 
-Caption format: dedup join of variants, subvariants, tags (variants first so
-keep_tokens=1 pins the leading variant token as the differentiator).
+Caption format: `soyjak, variants, subvariants, tags` (style trigger first so
+keep_tokens=2 pins soyjak + the leading variant).
 
 Usage:
     python gen_captions.py --image-dir /home/ubuntu/train_data \
@@ -25,29 +25,11 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-def dedup_preserve_order(items):
-    seen = set()
-    out = []
-    for item in items:
-        if item is None:
-            continue
-        tag = str(item).strip()
-        if not tag:
-            continue
-        key = tag.lower()
-        if key not in seen:
-            seen.add(key)
-            out.append(tag)
-    return out
-
-
-def build_caption(meta):
-    parts = []
-    parts.extend(meta.get("variants") or [])
-    parts.extend(meta.get("subvariants") or [])
-    parts.extend(meta.get("tags") or [])
-    return ", ".join(dedup_preserve_order(parts))
+from captions import TRIGGER_TOKEN, build_caption  # noqa: E402
 
 
 def main():
@@ -102,7 +84,7 @@ def main():
             continue
 
         caption = build_caption(meta)
-        if not caption:
+        if not caption or caption.strip().lower() == TRIGGER_TOKEN:
             stats["empty_caption"] += 1
             continue
 

@@ -2,6 +2,7 @@
 # pull_data.sh - Pull the dataset archive from R2 and extract it on the Lambda
 # instance.  Captions are already baked into the tar shards by package_dataset.py,
 # so no separate metadata download or gen_captions step is needed.
+# Legacy shards without the `soyjak` trigger are patched in place after extract.
 #
 # MODE=pilot (default): pulls the ~10K pilot shards.
 # MODE=full:            pulls all ~124K full-run shards.
@@ -50,7 +51,11 @@ if [ "$img_count" -ne "$txt_count" ]; then
     echo "WARNING: image/caption count mismatch — re-run package_dataset.py to rebuild shards" >&2
 fi
 
-# --- 3. Drop corrupt / oversized images ------------------------------------
+# --- 3. Pin the soyjak style trigger on legacy variant-first captions --------
+echo "==> Prefixing caption sidecars with soyjak style trigger"
+python "$REPO_DIR/train/ensure_trigger_captions.py" "$TRAIN_DATA"
+
+# --- 4. Drop corrupt / oversized images ------------------------------------
 MAX_LONG_SIDE="${MAX_LONG_SIDE:-2048}"
 echo "==> Pruning bad images (corrupt + longest side > ${MAX_LONG_SIDE}px)"
 python "$REPO_DIR/train/prune_bad_images.py" "$TRAIN_DATA" --max-long-side "$MAX_LONG_SIDE"

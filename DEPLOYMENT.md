@@ -8,9 +8,10 @@ After training on Lambda, artifacts live in `/home/ubuntu/out/` as kohya **`.saf
 
 | Artifact | R2 prefix | HF repo (current) |
 |---|---|---|
-| Full run final | `models/soyjak-lora-sdxl/soyjak-lora-sdxl.safetensors` | [ChineseWhiteGuy/soy_diffusion](https://huggingface.co/ChineseWhiteGuy/soy_diffusion) |
-| Full run checkpoints | `models/soyjak-lora-sdxl/soyjak-lora-sdxl-step*.safetensors` | (R2 only unless you upload them) |
-| Pilot run | `models/soyjak-lora-sdxl-pilot/` | separate repo if you create one |
+| Full run final (v2 style lock) | `models/soyjak-lora-sdxl-v2/soyjak-lora-sdxl-v2.safetensors` | re-publish to [ChineseWhiteGuy/soy_diffusion](https://huggingface.co/ChineseWhiteGuy/soy_diffusion) after the v2 run |
+| Full run checkpoints (v2) | `models/soyjak-lora-sdxl-v2/soyjak-lora-sdxl-v2-step*.safetensors` | (R2 only unless you upload them) |
+| Pilot run (v2) | `models/soyjak-lora-sdxl-pilot-v2/` | separate repo if you create one |
+| v1 full run (too general) | `models/soyjak-lora-sdxl/soyjak-lora-sdxl.safetensors` | previous public weight |
 
 Published HF weight name: **`soy_diffusion.safetensors`** (renamed from `soyjak-lora-sdxl.safetensors` for the public repo).
 
@@ -62,7 +63,7 @@ Space secrets (optional): add **`HF_TOKEN`** under Space Settings → Repository
 1. Create a **Model** on huggingface.co (empty repo is fine).
 2. Add credentials to `.env` (see `.env.example`).
 3. Upload from R2 or Lambda (below).
-4. Add a **README.md** model card (usage, base model, prompt style). The repo should explain booru-style tags and variant names as triggers.
+4. Add a **README.md** model card (usage, base model, prompt style). Every prompt must start with `soyjak`, then a variant name (`feraljak`, `chudjak`, …) and booru tags.
 5. Set visibility: **Private** while iterating, **Public** when ready.
 
 ### Upload from Lambda (after training)
@@ -83,7 +84,7 @@ source .venv/bin/activate   # needs huggingface_hub
 
 # Pull final checkpoint from R2
 .venv/bin/python r2_sync.py download-file \
-  --key models/soyjak-lora-sdxl/soyjak-lora-sdxl.safetensors \
+  --key models/soyjak-lora-sdxl-v2/soyjak-lora-sdxl-v2.safetensors \
   --dest ./hf_upload/soy_diffusion.safetensors
 
 # Push to model repo
@@ -200,9 +201,9 @@ Include at minimum:
 | Field | Value |
 |---|---|
 | Base model (training) | `bdsqlsz/stable-diffusion-xl-base-1.0_fixvae_fp16` |
-| LoRA type | kohya `networks.lora`, rank 32 / alpha 16 |
-| Training | ~105k images, 12k steps, effective batch 16 |
-| Prompting | No fixed trigger — variant names in captions (`feraljak`, `chudjak`, …) |
+| LoRA type | kohya `networks.lora`, rank 64 / alpha 32 (v2 style lock) |
+| Training | ~105k images, 18k steps, effective batch 16 |
+| Prompting | **Always** start with `soyjak`, then a variant (`feraljak`, `chudjak`, …) |
 | License | Your choice (set on repo) |
 
 ## Known issues and fixes (HF / Space)
@@ -235,6 +236,12 @@ Include at minimum:
 - Space: `ChineseWhiteGuy/soy_diffusion-demo` (Gradio, T4)
 - Source copied from R2 final checkpoint `models/soyjak-lora-sdxl/soyjak-lora-sdxl.safetensors`
 - Space debugging: Gradio/pydantic/Python YAML pins, private-repo auth, kohya→diffusers LoRA loading (SGM block map + UNet-only)
+
+### HF deploy — v2 soyjak-only (pending retraining)
+
+- After the v2 Lambda run, publish `models/soyjak-lora-sdxl-v2/soyjak-lora-sdxl-v2.safetensors` as `soy_diffusion.safetensors`
+- Prompt card: always `soyjak, <variant>, <tags>`. LoRA strength 1.0. Negative: photoreal / scenery / 3d
+- Prefer Forge/A1111/Comfy for judging style lock (full TE+UNet). Space remains UNet-only.
 - Local paths gitignored: `hf_upload/`, `hf_space/*.safetensors`
 
 ---
@@ -244,13 +251,13 @@ Include at minimum:
 ### List models on R2
 
 ```bash
-.venv/bin/python r2_sync.py list --prefix models/soyjak-lora-sdxl
+.venv/bin/python r2_sync.py list --prefix models/soyjak-lora-sdxl-v2
 ```
 
 ### Download full checkpoint locally
 
 ```bash
-.venv/bin/python r2_sync.py download --prefix models/soyjak-lora-sdxl --dest ./full_lora
+.venv/bin/python r2_sync.py download --prefix models/soyjak-lora-sdxl-v2 --dest ./full_lora
 ```
 
 ### Re-publish model + refresh Space bundle
@@ -258,7 +265,7 @@ Include at minimum:
 ```bash
 cd /path/to/soybrary
 .venv/bin/python r2_sync.py download-file \
-  --key models/soyjak-lora-sdxl/soyjak-lora-sdxl.safetensors \
+  --key models/soyjak-lora-sdxl-v2/soyjak-lora-sdxl-v2.safetensors \
   --dest ./hf_space/soy_diffusion.safetensors
 
 set -a && source .env && set +a

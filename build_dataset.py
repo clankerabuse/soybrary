@@ -9,8 +9,8 @@ For each completed static image (PNG/JPEG/WebP) it:
   - locates the real file on disk in data/images/{id}.* (the DB `extension`
     column is unreliable, so we trust the filesystem),
   - reads data/metadata/{id}.json,
-  - builds a booru-style caption: dedup(variants + subvariants + tags),
-    with variants first so kohya's keep_tokens can pin them,
+  - builds a booru-style caption: `soyjak, variants, subvariants, tags`
+    (fixed style trigger first so kohya keep_tokens can pin it),
   - applies a minimum short-side resolution filter (default 512px),
   - applies a maximum long-side filter (default 2048px; matches kohya buckets),
   - drops images that would have an empty caption.
@@ -34,6 +34,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from image_validate import check_image_path
+from captions import TRIGGER_TOKEN, build_caption, primary_variant
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -44,41 +45,6 @@ DB_PATH = DATA_DIR / "soybooru.db"
 
 # Mime types we consider trainable static images.
 STATIC_IMAGE_MIMES = ("image/png", "image/jpeg", "image/webp")
-
-
-def dedup_preserve_order(items):
-    """Lowercase-dedup a list of tag strings while preserving first-seen order."""
-    seen = set()
-    out = []
-    for item in items:
-        if item is None:
-            continue
-        tag = str(item).strip()
-        if not tag:
-            continue
-        key = tag.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(tag)
-    return out
-
-
-def build_caption(meta):
-    """
-    Booru-style caption with no fixed trigger word.
-
-    Order: variants -> subvariants -> tags. Variant names are the
-    differentiators (chudjak, cobson, ...) and come first so that
-    keep_tokens=1 in the kohya config pins the leading variant token.
-    Underscores are preserved (standard booru convention).
-    """
-    parts = []
-    parts.extend(meta.get("variants") or [])
-    parts.extend(meta.get("subvariants") or [])
-    parts.extend(meta.get("tags") or [])
-    tags = dedup_preserve_order(parts)
-    return ", ".join(tags)
 
 
 def image_is_readable(path: Path) -> bool:
@@ -109,8 +75,8 @@ def stratified_sample(records, limit, seed):
     """
     Sample ~`limit` records while preserving variant diversity.
 
-    Each record is bucketed by its primary variant (the leading caption token,
-    i.e. the first variant/subvariant/tag). We then round-robin across buckets,
+    Each record is bucketed by its primary variant (the first caption token
+    after the `soyjak` style trigger). We then round-robin across buckets,
     drawing one shuffled record at a time, until we hit `limit`. This avoids a
     naive head-N slice that would over-represent low post IDs / early variants,
     and guarantees rare variants still appear in a small pilot set.
@@ -121,7 +87,7 @@ def stratified_sample(records, limit, seed):
     rng = random.Random(seed)
     buckets = defaultdict(list)
     for rec in records:
-        primary = rec["caption"].split(",", 1)[0].strip().lower()
+        primary = primary_variant(rec["caption"])
         buckets[primary].append(rec)
 
     bucket_keys = list(buckets.keys())
@@ -268,7 +234,7 @@ def main():
             continue
 
         caption = build_caption(meta)
-        if not caption:
+        if not caption or caption.strip().lower() == TRIGGER_TOKEN:
             stats["empty_caption"] += 1
             continue
 
@@ -296,7 +262,7 @@ def main():
     examples = records[:5]
     with open(args.out, "w", encoding="utf-8") as out_f:
         for record in records:
-            primary = record["caption"].split(",", 1)[0].strip().lower()
+            primary = primary_variant(record["caption"])
             variant_counter[primary] += 1
             out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
 

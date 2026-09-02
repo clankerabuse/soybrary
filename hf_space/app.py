@@ -9,8 +9,13 @@ BASE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
 VAE_MODEL = "madebyollin/sdxl-vae-fp16-fix"
 LORA_FILE = Path(__file__).resolve().parent / "soy_diffusion.safetensors"
 
+STYLE_TRIGGER = "soyjak"
 DEFAULT_PROMPT = (
-    "feraljak, screaming, snail, pink_hair, hammer_and_sickle, tears, 4chan"
+    "soyjak, feraljak, screaming, snail, pink_hair, hammer_and_sickle, tears, 4chan"
+)
+DEFAULT_NEGATIVE = (
+    "photorealistic, photo, photograph, realistic, 3d, render, scenery, "
+    "landscape, painting, anime screenshot, watermark, text, blurry, low quality"
 )
 
 pipe = None
@@ -64,6 +69,17 @@ def load_pipeline():
     return pipe
 
 
+def ensure_style_trigger(prompt: str) -> str:
+    """Keep inference on the soyjak concept even if the user omits the trigger."""
+    text = (prompt or "").strip()
+    if not text:
+        return STYLE_TRIGGER
+    tokens = [t.strip().lower() for t in text.split(",")]
+    if any(STYLE_TRIGGER in token for token in tokens):
+        return text
+    return f"{STYLE_TRIGGER}, {text}"
+
+
 def generate(
     prompt,
     negative_prompt,
@@ -75,6 +91,7 @@ def generate(
     seed,
 ):
     p = load_pipeline()
+    prompt = ensure_style_trigger(prompt)
     generator = torch.Generator(device="cuda").manual_seed(int(seed))
     image = p(
         prompt=prompt,
@@ -92,8 +109,9 @@ def generate(
 with gr.Blocks(title="soy_diffusion") as demo:
     gr.Markdown(
         "# soy_diffusion\n"
-        "SDXL LoRA demo. Prompt with booru-style tags — variant names like "
-        "`feraljak`, `chudjak`, `cobson` steer the character/style."
+        "SDXL LoRA demo. **Always soyjak.** Start prompts with `soyjak`, then a "
+        "variant (`feraljak`, `chudjak`, `cobson`, …) and booru tags. The trigger "
+        "is prepended automatically if you leave it out."
     )
     with gr.Row():
         with gr.Column():
@@ -104,10 +122,10 @@ with gr.Blocks(title="soy_diffusion") as demo:
             )
             negative = gr.Textbox(
                 label="Negative prompt",
-                value="blurry, low quality, watermark, text",
+                value=DEFAULT_NEGATIVE,
                 lines=2,
             )
-            lora_scale = gr.Slider(0.0, 1.5, value=0.85, step=0.05, label="LoRA strength")
+            lora_scale = gr.Slider(0.0, 1.5, value=1.0, step=0.05, label="LoRA strength")
             steps = gr.Slider(10, 50, value=28, step=1, label="Steps")
             guidance = gr.Slider(1.0, 15.0, value=7.0, step=0.5, label="CFG scale")
             with gr.Row():

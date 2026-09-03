@@ -2,6 +2,13 @@
 cd /d "%~dp0"
 echo Starting Soybrary...
 echo.
-start http://localhost:8000
-.venv\Scripts\python.exe -m uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+
+set PYTHON=.venv\Scripts\python.exe
+if not exist "%PYTHON%" set PYTHON=python
+
+for /f %%i in ('%PYTHON% -c "import json;c=json.load(open('config.json'));print(c.get('port',8000))"') do set PORT=%%i
+if "%PORT%"=="" set PORT=8000
+
+start http://localhost:%PORT%
+%PYTHON% server.py
 pause

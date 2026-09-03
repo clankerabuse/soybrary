@@ -452,7 +452,6 @@ header {
     overflow: hidden;
     background: var(--surface);
     transition: transform var(--t), box-shadow var(--t);
-    will-change: transform;
 }
 
 .masonry-item::after {

@@ -1,155 +1,51 @@
-import os
-import io
-import re
-import json
-import base64
 import asyncio
+import base64
+import io
+import json
+import logging
+import os
 import random
-import sqlite3
-import datetime
-import threading
-import traceback
-from pathlib import Path
-from PIL import Image
-import subprocess
-import tempfile
+import re
 import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+
+from PIL import Image
 
 # Import playwright
 from playwright.async_api import async_playwright
 
-CONFIG_FILE = "config.json"
+from library import (
+    DB_PATH,
+    IMAGES_DIR,
+    METADATA_DIR,
+    VIDEOS_DIR,
+    Database,
+    config,
+    is_video_extension,
+    safe_extension,
+    thumbnail_from_bytes,
+    thumbnail_from_video,
+)
 
-# Default configuration
-DEFAULT_CONFIG = {
-    "concurrency": 3,
-    "delay_ms": 2000,
-    "data_dir": "./data",
-    "validate_images": True,
-    "sanitize_images": True,
-    "validate_videos": True,
-    "sanitize_videos": False
-}
+logger = logging.getLogger(__name__)
 
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                config = json.load(f)
-                # Merge with default keys
-                for k, v in DEFAULT_CONFIG.items():
-                    if k not in config:
-                        config[k] = v
-                return config
-        except Exception as e:
-            print(f"Error loading config.json, using defaults. Error: {e}")
-    return DEFAULT_CONFIG
-
-config = load_config()
-DATA_DIR = Path(config["data_dir"])
-IMAGES_DIR = DATA_DIR / "images"
-VIDEOS_DIR = DATA_DIR / "videos"
-METADATA_DIR = DATA_DIR / "metadata"
-DB_PATH = DATA_DIR / "soybooru.db"
-
-# Create directories
-IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
-METADATA_DIR.mkdir(parents=True, exist_ok=True)
-
-# Database Manager
-class Database:
-    def __init__(self, db_path):
-        self.db_path = db_path
-        self._local = threading.local()
-
-    def _get_conn(self):
-        if not hasattr(self._local, 'conn') or self._local.conn is None:
-            self._local.conn = sqlite3.connect(self.db_path, timeout=10.0)
-        return self._local.conn
-
-    def setup(self):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS posts (
-                id INTEGER PRIMARY KEY,
-                status TEXT,
-                variant TEXT,
-                subvariant TEXT,
-                tags TEXT,
-                date_uploaded TEXT,
-                file_url TEXT,
-                width INTEGER,
-                height INTEGER,
-                file_size INTEGER,
-                image_hash TEXT,
-                mime_type TEXT,
-                extension TEXT,
-                uploader TEXT,
-                original_filename TEXT,
-                last_scraped TEXT,
-                error_message TEXT
-            )
-        """)
-        conn.commit()
-
-    def get_post_status(self, post_id):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute("SELECT status FROM posts WHERE id = ?", (post_id,))
-        row = cursor.fetchone()
-        return row[0] if row else None
-
-    def save_post(self, post_id, status, variant=None, subvariant=None, tags=None,
-                  date_uploaded=None, file_url=None, width=None, height=None,
-                  file_size=None, image_hash=None, mime_type=None, extension=None,
-                  uploader=None, original_filename=None, error_message=None):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        cursor.execute("""
-            INSERT INTO posts (
-                id, status, variant, subvariant, tags, date_uploaded, file_url,
-                width, height, file_size, image_hash, mime_type, extension,
-                uploader, original_filename, last_scraped, error_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                status = excluded.status,
-                variant = excluded.variant,
-                subvariant = excluded.subvariant,
-                tags = excluded.tags,
-                date_uploaded = excluded.date_uploaded,
-                file_url = excluded.file_url,
-                width = excluded.width,
-                height = excluded.height,
-                file_size = excluded.file_size,
-                image_hash = excluded.image_hash,
-                mime_type = excluded.mime_type,
-                extension = excluded.extension,
-                uploader = excluded.uploader,
-                original_filename = excluded.original_filename,
-                last_scraped = excluded.last_scraped,
-                error_message = excluded.error_message
-        """, (
-            post_id, status, variant, subvariant, tags, date_uploaded, file_url,
-            width, height, file_size, image_hash, mime_type, extension,
-            uploader, original_filename, now, error_message
-        ))
-        conn.commit()
-
-    def close(self):
-        if hasattr(self._local, 'conn') and self._local.conn:
-            self._local.conn.close()
+BOORU_ORIGIN = "https://soybooru.com"
+FALLBACK_LATEST_ID = 245000
+# Time given to the landing page to clear Turnstile and the proof-of-work check.
+ACTIVATION_WAIT_SECONDS = 5
+STATS_TEMPLATE = {"completed": 0, "skipped": 0, "empty": 0, "failed": 0}
 
 db = Database(DB_PATH)
-db.setup()
+
 
 # Magic Bytes Signatures
 def validate_magic_bytes(data: bytes, mime_type: str, ext: str) -> bool:
-    mime_type = mime_type.lower()
-    ext = ext.lower()
-    
+    mime_type = (mime_type or "").lower()
+    ext = (ext or "").lower()
+
     if mime_type == 'image/png' or ext == 'png':
         return data.startswith(b'\x89PNG\r\n\x1a\n')
     elif mime_type in ['image/jpeg', 'image/jpg'] or ext in ['jpg', 'jpeg']:
@@ -165,10 +61,12 @@ def validate_magic_bytes(data: bytes, mime_type: str, ext: str) -> bool:
     # Fallback/unknown format: let it fail Pillow verification or log it
     return False
 
+
 def check_ffmpeg_available():
     has_ffmpeg = shutil.which("ffmpeg") is not None
     has_ffprobe = shutil.which("ffprobe") is not None
     return has_ffmpeg, has_ffprobe
+
 
 def verify_and_sanitize_video(file_data: bytes, mime_type: str, ext: str) -> bytes:
     if not validate_magic_bytes(file_data, mime_type, ext):
@@ -177,7 +75,7 @@ def verify_and_sanitize_video(file_data: bytes, mime_type: str, ext: str) -> byt
     has_ffmpeg, has_ffprobe = check_ffmpeg_available()
 
     if not has_ffprobe:
-        print("WARNING: ffprobe not found. Falling back to magic-bytes-only validation for video.")
+        logger.warning("ffprobe not found. Falling back to magic-bytes-only validation for video.")
         return file_data
 
     with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
@@ -209,7 +107,8 @@ def verify_and_sanitize_video(file_data: bytes, mime_type: str, ext: str) -> byt
             )
 
             if sanitize_result.returncode != 0:
-                print(f"WARNING: ffmpeg sanitization failed, returning original: {sanitize_result.stderr.strip()}")
+                logger.warning("ffmpeg sanitization failed, returning original: %s",
+                               sanitize_result.stderr.strip())
             else:
                 with open(clean_path, "rb") as f:
                     file_data = f.read()
@@ -219,6 +118,7 @@ def verify_and_sanitize_video(file_data: bytes, mime_type: str, ext: str) -> byt
     finally:
         os.remove(tmp_path)
 
+
 def verify_and_sanitize_file(file_data: bytes, mime_type: str, ext: str) -> bytes:
     if mime_type.startswith("image/") and config["validate_images"]:
         return verify_and_sanitize_image(file_data, mime_type, ext)
@@ -226,30 +126,65 @@ def verify_and_sanitize_file(file_data: bytes, mime_type: str, ext: str) -> byte
         return verify_and_sanitize_video(file_data, mime_type, ext)
     return file_data
 
+
 # Security verification and sanitization
+SANITIZABLE_IMAGE_MIMES = ('image/png', 'image/jpeg', 'image/jpg', 'image/webp')
+VERIFIABLE_IMAGE_MIMES = SANITIZABLE_IMAGE_MIMES + ('image/gif',)
+
+
+def _resave_without_metadata(file_data: bytes) -> bytes:
+    """Re-encode an image to drop EXIF/ICC payloads, preserving the pixels.
+
+    Animated files are left untouched: a re-save would keep only the first
+    frame, and animation is most of what a soyjak library is made of.
+    """
+    img = Image.open(io.BytesIO(file_data))
+    if getattr(img, "n_frames", 1) > 1:
+        return file_data
+
+    save_kwargs = {}
+    if img.format == "JPEG":
+        # Re-encoding at Pillow's default quality would visibly degrade every
+        # JPEG in the library; "keep" reuses the original coefficients.
+        save_kwargs = {"quality": "keep", "subsampling": "keep"}
+    elif img.format == "WEBP":
+        save_kwargs = {"lossless": True} if img.mode in ("RGBA", "LA", "P") else {"quality": 95}
+
+    out_buf = io.BytesIO()
+    img.save(out_buf, format=img.format, **save_kwargs)
+    return out_buf.getvalue()
+
+
 def verify_and_sanitize_image(file_data: bytes, mime_type: str, ext: str) -> bytes:
     # 1. Magic bytes check
     if not validate_magic_bytes(file_data, mime_type, ext):
         raise ValueError(f"Magic bytes signature mismatch for {mime_type} / .{ext}")
-        
+
     # 2. Image structure verification (Pillow)
-    if mime_type in ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif']:
+    if mime_type in VERIFIABLE_IMAGE_MIMES:
         try:
             img = Image.open(io.BytesIO(file_data))
             img.verify()
-            
-            # 3. Optional Sanitization (Strip metadata by re-encoding)
-            if config["sanitize_images"] and mime_type in ['image/png', 'image/jpeg', 'image/jpg', 'image/webp']:
-                # Re-open because verify() closes the stream and prohibits saving
-                img = Image.open(io.BytesIO(file_data))
-                out_buf = io.BytesIO()
-                # Saving without original EXIF/metadata
-                img.save(out_buf, format=img.format)
-                return out_buf.getvalue()
+
+            # 3. Optional sanitization (strip metadata by re-encoding)
+            if config["sanitize_images"] and mime_type in SANITIZABLE_IMAGE_MIMES:
+                return _resave_without_metadata(file_data)
         except Exception as e:
             raise ValueError(f"Pillow verification failed: {e}")
-            
+
     return file_data
+
+
+def resolve_extension(mime_type: str, original_filename: str) -> str:
+    """Pick a safe on-disk extension from the reported mime type / filename."""
+    ext = mime_type.split("/")[-1] if "/" in (mime_type or "") else "bin"
+    if ext == "jpeg":
+        ext = "jpg"
+    if original_filename and "." in original_filename:
+        ext = original_filename.rsplit(".", 1)[-1]
+    # Remote-controlled input: never let it escape the media directories.
+    return safe_extension(ext) or "bin"
+
 
 # Scraper Class wrapping Page-level evaluations
 class Scraper:
@@ -295,11 +230,25 @@ class Scraper:
                 }
             }
         """, url)
-        
+
         if result["status"] == 200 and result["data"] is not None:
             # Decode base64 back to bytes
             return base64.b64decode(result["data"]), 200
         return None, result["status"]
+
+
+async def _pregenerate_thumbnail(post_id, file_data, media_path, is_video):
+    """Build the gallery thumbnail now, while the bytes are already in hand."""
+    if not config.get("pregenerate_thumbnails", True):
+        return
+    try:
+        if is_video:
+            await asyncio.to_thread(thumbnail_from_video, post_id, media_path)
+        else:
+            await asyncio.to_thread(thumbnail_from_bytes, post_id, file_data)
+    except Exception as e:
+        logger.debug("Thumbnail pregeneration failed for %s: %s", post_id, e)
+
 
 # Core scrape worker
 async def scrape_post(scraper, post_id):
@@ -308,35 +257,36 @@ async def scrape_post(scraper, post_id):
     if status in ['completed', 'skipped', 'empty']:
         return "skipped"
 
-    meta_url = f"https://soybooru.com/api/booru/posts/{post_id}"
-    file_url = f"https://soybooru.com/api/booru/posts/{post_id}/file"
-    
+    meta_url = f"{BOORU_ORIGIN}/api/booru/posts/{post_id}"
+    file_url = f"{BOORU_ORIGIN}/api/booru/posts/{post_id}/file"
+
     try:
         res = await scraper.get_json(meta_url)
-        
+
         status_code = res.get("status")
         data = res.get("data")
-        
+
         if status_code == 404 or (data is not None and data.get("id") is None):
             db.save_post(post_id, "empty")
             return "empty"
-        
+
         # Retry on rate limit / server overload (exponential backoff)
         max_retries = 3
         retries = 0
         while status_code in (429, 503) and retries < max_retries:
             retries += 1
             wait = (2 ** retries) * 5
-            print(f"Post {post_id}: Got {status_code}, retrying in {wait}s (attempt {retries}/{max_retries})")
+            logger.info("Post %s: got %s, retrying in %ss (attempt %s/%s)",
+                        post_id, status_code, wait, retries, max_retries)
             await asyncio.sleep(wait)
             res = await scraper.get_json(meta_url)
             status_code = res.get("status")
             data = res.get("data")
-            
+
         if status_code != 200 or data is None:
             db.save_post(post_id, "failed", error_message=f"HTTP Status {status_code}: {res.get('error')}")
             return "failed"
-            
+
         # Parse tags — separate general tags from variant/subvariant
         tags_list   = data.get("tags", [])
         variants    = [t.get("name") for t in tags_list if t.get("category") == "variant"]
@@ -347,51 +297,44 @@ async def scrape_post(scraper, post_id):
         variant_str    = ",".join(variants)    if variants    else None
         subvariant_str = ",".join(subvariants) if subvariants else None
         tags_str       = " ".join(general_tags) if general_tags else None
-        
+
         # Safe mime type and original filename
         mime_type = data.get("mimeType", "application/octet-stream")
         orig_filename = data.get("originalFileName", "")
-        
-        # Deduce extension
-        ext = mime_type.split("/")[-1] if "/" in mime_type else "bin"
-        if ext == "jpeg":
-            ext = "jpg"
-        if orig_filename and "." in orig_filename:
-            ext = orig_filename.split(".")[-1]
-            
+        ext = resolve_extension(mime_type, orig_filename)
+
         # Download the file
         file_data, file_status = await scraper.download_file(file_url)
-        
+
         # Retry file download on rate limit / server overload
         retries = 0
         while file_status in (429, 503) and retries < max_retries:
             retries += 1
             wait = (2 ** retries) * 5
-            print(f"Post {post_id}: File download got {file_status}, retrying in {wait}s (attempt {retries}/{max_retries})")
+            logger.info("Post %s: file download got %s, retrying in %ss (attempt %s/%s)",
+                        post_id, file_status, wait, retries, max_retries)
             await asyncio.sleep(wait)
             file_data, file_status = await scraper.download_file(file_url)
-            
+
         if file_status != 200 or file_data is None:
             db.save_post(post_id, "failed", error_message=f"File download HTTP Status {file_status}")
             return "failed"
-            
+
         # Verify and sanitize file
         try:
             file_data = verify_and_sanitize_file(file_data, mime_type, ext)
         except Exception as e:
             db.save_post(post_id, "failed", error_message=f"Verification error: {e}")
-            print(f"Post {post_id}: Threat mitigation validation failed! Error: {e}")
+            logger.warning("Post %s: threat mitigation validation failed: %s", post_id, e)
             return "failed"
-                
+
         # Write files
-        # 1. Image or Video
-        if mime_type.startswith("video/"):
-            media_path = VIDEOS_DIR / f"{post_id}.{ext}"
-        else:
-            media_path = IMAGES_DIR / f"{post_id}.{ext}"
+        # 1. Image or video
+        is_video = is_video_extension(ext, mime_type)
+        media_path = (VIDEOS_DIR if is_video else IMAGES_DIR) / f"{post_id}.{ext}"
         with open(media_path, "wb") as f:
             f.write(file_data)
-            
+
         # 2. Simplified JSON metadata — tags is general tags only, variant/subvariant separate
         simplified_meta = {
             "postNumber": post_id,
@@ -409,7 +352,7 @@ async def scrape_post(scraper, post_id):
         meta_path = METADATA_DIR / f"{post_id}.json"
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(simplified_meta, f, indent=2)
-            
+
         # 3. Database
         db.save_post(
             post_id=post_id,
@@ -428,17 +371,65 @@ async def scrape_post(scraper, post_id):
             uploader=data.get("uploader", {}).get("userName"),
             original_filename=orig_filename
         )
+
+        # 4. Thumbnail, so the gallery never has to generate one while browsing
+        await _pregenerate_thumbnail(post_id, file_data, media_path, is_video)
         return "completed"
-        
+
     except Exception as e:
         db.save_post(post_id, "failed", error_message=str(e))
-        print(f"Error scraping post {post_id}: {e}")
+        logger.error("Error scraping post %s: %s", post_id, e)
         return "failed"
+
+
+def pending_ids(start_id, end_id, limit=None):
+    """Ids in the range that still need scraping.
+
+    One range query beats asking the database about every id in turn: a full
+    catalog sweep is hundreds of thousands of ids.
+    """
+    done = db.get_done_ids(start_id, end_id)
+    pending = []
+    for pid in range(start_id, end_id + 1):
+        if pid in done:
+            continue
+        pending.append(pid)
+        if limit and len(pending) >= limit:
+            break
+    return pending
+
+
+def resume_start_id():
+    """Default scrape start: just after the highest post already recorded."""
+    resume = db.get_resume_id()
+    if resume:
+        return resume
+
+    known = set()
+    for directory in (IMAGES_DIR, VIDEOS_DIR):
+        if not directory.exists():
+            continue
+        for f in directory.iterdir():
+            if f.is_file() and f.stem.isdigit():
+                known.add(int(f.stem))
+    return max(known) if known else 1
+
+
+async def detect_latest_id(page):
+    html = await page.content()
+    post_ids = [int(m) for m in re.findall(r'/post/view/(\d+)', html)]
+    return max(post_ids) if post_ids else None
+
+
+def scrape_delay(delay_ms):
+    """Politeness delay with ±30% jitter so requests don't arrive in lockstep."""
+    jitter = random.uniform(-delay_ms * 0.3, delay_ms * 0.3)
+    return max(100, delay_ms + jitter) / 1000.0
 
 
 class ScrapeJob:
     """Manages a scrape session with progress tracking and real-time updates."""
-    
+
     def __init__(self, start_id=None, end_id=None, limit=None, progress_queue=None, main_loop=None):
         self.start_id = start_id
         self.end_id = end_id
@@ -447,20 +438,32 @@ class ScrapeJob:
         self.main_loop = main_loop or asyncio.get_event_loop()
         self.running = False
         self.cancelled = False
-        self.stats = {"completed": 0, "skipped": 0, "empty": 0, "failed": 0}
+        self.stats = dict(STATS_TEMPLATE)
         self.current_id = None
         self.total_queue = 0
         self.message = "Initializing..."
-        self._task = None
-        
+
     async def _emit(self, event_type, data=None):
         event = {"type": event_type, "data": data or {}}
-        # Use run_coroutine_threadsafe to put events into the main loop's queue
-        asyncio.run_coroutine_threadsafe(
-            self.progress_queue.put(event),
-            self.main_loop
-        )
-        
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is self.main_loop:
+            await self.progress_queue.put(event)
+            return
+        # The scrape runs on its own event loop; hand events back to the server's.
+        try:
+            asyncio.run_coroutine_threadsafe(self.progress_queue.put(event), self.main_loop)
+        except RuntimeError:
+            pass
+
+    def _progress_message(self, post_id, result, total_done):
+        if self.end_id:
+            pct = min(100.0, (post_id / self.end_id) * 100)
+            return f"[{total_done}] Scraped {post_id}: {result.upper()} ({pct:.2f}%)"
+        return f"[{total_done}] Scraped {post_id}: {result.upper()}"
+
     async def _worker(self, queue, scraper, delay_ms):
         while True:
             if self.cancelled:
@@ -472,60 +475,51 @@ class ScrapeJob:
                     except asyncio.QueueEmpty:
                         break
                 return
-                
+
             try:
                 post_id = await asyncio.wait_for(queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
-                
+
             try:
                 self.current_id = post_id
                 await self._emit("post_start", {"id": post_id})
                 res = await scrape_post(scraper, post_id)
-                self.stats[res] += 1
+                self.stats[res] = self.stats.get(res, 0) + 1
                 total_done = sum(self.stats.values())
-                
-                if res in ["completed", "empty", "failed"]:
-                    pct = (post_id / self.end_id) * 100
-                    msg = f"[{total_done}] Scraped {post_id}: {res.upper()} ({pct:.2f}%)"
-                    print(msg)
-                    await self._emit("console", {"message": msg, "level": "success" if res == "completed" else ("warning" if res == "empty" else "error")})
+
+                if res in ("completed", "empty", "failed"):
+                    msg = self._progress_message(post_id, res, total_done)
+                    logger.info(msg)
+                    level = {"completed": "success", "empty": "warning"}.get(res, "error")
+                    await self._emit("console", {"message": msg, "level": level})
                     await self._emit("post_done", {
-                        "id": post_id, 
+                        "id": post_id,
                         "status": res,
                         "total_done": total_done,
                         "stats": dict(self.stats)
                     })
-                
+
                 if res != "skipped":
-                    jitter = random.uniform(-delay_ms * 0.3, delay_ms * 0.3)
-                    actual_delay = max(100, delay_ms + jitter) / 1000.0
-                    await asyncio.sleep(actual_delay)
-            except asyncio.CancelledError:
-                queue.task_done()
-                return
+                    await asyncio.sleep(scrape_delay(delay_ms))
             finally:
                 queue.task_done()
-                
+
     async def run(self):
         self.running = True
         self.cancelled = False
-        self.stats = {"completed": 0, "skipped": 0, "empty": 0, "failed": 0}
-        
-        print(f"ScrapeJob.run() starting: range {self.start_id} to {self.end_id}")
+        self.stats = dict(STATS_TEMPLATE)
+
+        logger.info("ScrapeJob starting: range %s to %s", self.start_id, self.end_id)
         await self._emit("status", {"message": "Launching browser..."})
-        
-        # Run Playwright in a separate thread with ProactorEventLoop
-        # because the main loop (SelectorEventLoop on Windows) doesn't support subprocesses
-        import threading
-        import concurrent.futures
-        
+
+        # Playwright drives subprocesses, which needs a loop that supports them
+        # (ProactorEventLoop on Windows), so it gets a thread and loop of its own.
         error_holder = [None]
         done_event = threading.Event()
-        
-        def _run_in_proactor():
-            # ProactorEventLoop is Windows-only; Linux/macOS need SelectorEventLoop for subprocesses.
-            if hasattr(asyncio, "ProactorEventLoop"):
+
+        def _run_playwright_thread():
+            if sys.platform == "win32" and hasattr(asyncio, "ProactorEventLoop"):
                 loop = asyncio.ProactorEventLoop()
             else:
                 loop = asyncio.new_event_loop()
@@ -534,98 +528,82 @@ class ScrapeJob:
                 loop.run_until_complete(self._run_playwright())
             except Exception as e:
                 error_holder[0] = e
-                logger.error(f"Playwright thread exception: {e}")
-                logger.exception("Full traceback:")
+                logger.exception("Playwright thread exception: %s", e)
             finally:
                 loop.close()
                 done_event.set()
-        
-        thread = threading.Thread(target=_run_in_proactor, daemon=True)
+
+        thread = threading.Thread(target=_run_playwright_thread, daemon=True)
         thread.start()
-        
-        # Wait for completion in the main async context
-        while not done_event.is_set():
-            await asyncio.sleep(0.1)
-            if self.cancelled:
-                break
-        
+        await asyncio.to_thread(done_event.wait)
+        # Let events the scrape thread handed over land before the summary.
+        await asyncio.sleep(0)
+
         if error_holder[0]:
             await self._emit("error", {"message": str(error_holder[0])})
-        
+
         self.running = False
         await self._emit("complete", {"stats": dict(self.stats)})
-        print(f"\nScrape session ended. Stats: {self.stats}")
+        logger.info("Scrape session ended. Stats: %s", self.stats)
 
     async def _run_playwright(self):
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context()
             page = await context.new_page()
-            
-            await self._emit("status", {"message": "Activating Turnstile & PoW..."})
-            await page.goto("https://soybooru.com/booru", timeout=60000)
-            await asyncio.sleep(5)
-            
-            scraper = Scraper(page)
-            
-            if self.end_id is None:
-                html = await page.content()
-                post_ids = [int(m) for m in re.findall(r'/post/view/(\d+)', html)]
-                if post_ids:
-                    self.end_id = max(post_ids)
-                else:
-                    self.end_id = 245000
-                    
-            await self._emit("status", {
-                "message": f"Scraping range {self.start_id} to {self.end_id}",
-                "range_start": self.start_id,
-                "range_end": self.end_id
-            })
-            
-            queue = asyncio.Queue()
-            count = 0
-            for pid in range(self.start_id, self.end_id + 1):
-                if self.cancelled:
-                    break
-                status = db.get_post_status(pid)
-                if status in ['completed', 'skipped', 'empty']:
-                    continue
-                await queue.put(pid)
-                count += 1
-                if self.limit and count >= self.limit:
-                    break
-                    
-            self.total_queue = count
-            await self._emit("status", {"message": f"Queue populated: {count} posts"})
-            
-            if count == 0:
-                await self._emit("status", {"message": "No new posts to scrape."})
-                await browser.close()
-                return
-                
-            concurrency = config["concurrency"]
-            delay_ms = config["delay_ms"]
-            
-            tasks = []
-            for _ in range(concurrency):
-                t = asyncio.create_task(self._worker(queue, scraper, delay_ms))
-                tasks.append(t)
-                
+
             try:
-                await queue.join()
-            except asyncio.CancelledError:
-                for t in tasks:
-                    t.cancel()
-                    
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await browser.close()
-            
+                await self._emit("status", {"message": "Activating Turnstile & PoW..."})
+                await page.goto(f"{BOORU_ORIGIN}/booru", timeout=60000)
+                await asyncio.sleep(ACTIVATION_WAIT_SECONDS)
+
+                scraper = Scraper(page)
+
+                if self.start_id is None:
+                    self.start_id = resume_start_id()
+                if self.end_id is None:
+                    self.end_id = await detect_latest_id(page) or FALLBACK_LATEST_ID
+
+                await self._emit("status", {
+                    "message": f"Scraping range {self.start_id} to {self.end_id}",
+                    "range_start": self.start_id,
+                    "range_end": self.end_id
+                })
+
+                pending = await asyncio.to_thread(
+                    pending_ids, self.start_id, self.end_id, self.limit)
+                if self.cancelled:
+                    return
+
+                queue = asyncio.Queue()
+                for pid in pending:
+                    queue.put_nowait(pid)
+
+                self.total_queue = len(pending)
+                await self._emit("status", {"message": f"Queue populated: {self.total_queue} posts"})
+
+                if not pending:
+                    await self._emit("status", {"message": "No new posts to scrape."})
+                    return
+
+                tasks = [
+                    asyncio.create_task(self._worker(queue, scraper, config["delay_ms"]))
+                    for _ in range(config["concurrency"])
+                ]
+
+                try:
+                    await queue.join()
+                finally:
+                    for t in tasks:
+                        t.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                await browser.close()
+
     def cancel(self):
         self.cancelled = True
         self.message = "Cancelling..."
-        
+
     def get_status(self):
         return {
             "running": self.running,
@@ -638,64 +616,42 @@ class ScrapeJob:
         }
 
 
-# Legacy CLI entry point (unchanged behavior)
-async def worker(queue, scraper, stats, delay_ms, end_id):
+# CLI entry point
+async def worker(queue, scraper, stats, delay_ms, end_id=None):
     while True:
         post_id = await queue.get()
         try:
             res = await scrape_post(scraper, post_id)
-            stats[res] += 1
-            total_done = stats["completed"] + stats["skipped"] + stats["empty"] + stats["failed"]
-            
-            # Progress print
-            if res in ["completed", "empty", "failed"]:
-                pct = (post_id / end_id) * 100
-                print(f"[{total_done}] Scraped {post_id}: {res.upper()} ({pct:.2f}%)")
-                
-            # Rate limit delay with random jitter (±30%)
+            stats[res] = stats.get(res, 0) + 1
+            total_done = sum(stats.values())
+
+            if res in ("completed", "empty", "failed"):
+                if end_id:
+                    pct = min(100.0, (post_id / end_id) * 100)
+                    print(f"[{total_done}] Scraped {post_id}: {res.upper()} ({pct:.2f}%)")
+                else:
+                    print(f"[{total_done}] Scraped {post_id}: {res.upper()}")
+
             if res != "skipped":
-                jitter = random.uniform(-delay_ms * 0.3, delay_ms * 0.3)
-                actual_delay = max(100, delay_ms + jitter) / 1000.0
-                await asyncio.sleep(actual_delay)
+                await asyncio.sleep(scrape_delay(delay_ms))
         finally:
             queue.task_done()
+
 
 async def main():
     import argparse
     parser = argparse.ArgumentParser(description="Soybooru Downloader Scraper (Headless)")
-    parser.add_argument("--start", type=int, default=None, help="Post ID to start scraping from (default: 1, or auto-resumes from highest matched file if previous runs are found)")
+    parser.add_argument("--start", type=int, default=None, help="Post ID to start scraping from (default: resumes after the highest post already stored)")
     parser.add_argument("--end", type=int, help="Post ID to stop scraping at (default: latest)")
     parser.add_argument("--limit", type=int, help="Limit total posts to scrape in this run")
     args = parser.parse_args()
 
-    # Get range
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
     start_id = args.start
     if start_id is None:
-        meta_ids = set()
-        for f in METADATA_DIR.iterdir():
-            if f.is_file() and f.suffix == '.json':
-                if f.stem.isdigit():
-                    meta_ids.add(int(f.stem))
-
-        image_ids = set()
-        for f in IMAGES_DIR.iterdir():
-            if f.is_file():
-                if f.stem.isdigit():
-                    image_ids.add(int(f.stem))
-
-        video_ids = set()
-        for f in VIDEOS_DIR.iterdir():
-            if f.is_file():
-                if f.stem.isdigit():
-                    video_ids.add(int(f.stem))
-
-        matching_ids = meta_ids.intersection(image_ids.union(video_ids))
-        if matching_ids:
-            start_id = max(matching_ids)
-            print(f"Auto-detect: Previous run found. Starting default scrape from highest matched post ID: {start_id}")
-        else:
-            start_id = 1
-            print(f"Auto-detect: No previous runs detected. Starting scrape from post ID: {start_id}")
+        start_id = resume_start_id()
+        print(f"Resuming from post ID: {start_id}")
 
     end_id = args.end
 
@@ -705,76 +661,61 @@ async def main():
         # Use standard, unmodified context to prevent fingerprint detection
         context = await browser.new_context()
         page = await context.new_page()
-        
-        print("Navigating to https://soybooru.com/booru (Turnstile & PoW activation)...")
-        await page.goto("https://soybooru.com/booru", timeout=60000)
+
+        print(f"Navigating to {BOORU_ORIGIN}/booru (Turnstile & PoW activation)...")
+        await page.goto(f"{BOORU_ORIGIN}/booru", timeout=60000)
         # Wait for page scripts to load and verify
-        await asyncio.sleep(5)
-        
-        # Instantiate Scraper
+        await asyncio.sleep(ACTIVATION_WAIT_SECONDS)
+
         scraper = Scraper(page)
-        
+
         if end_id is None:
-            # Detect latest post ID
-            html = await page.content()
-            post_ids = [int(m) for m in re.findall(r'/post/view/(\d+)', html)]
-            if post_ids:
-                end_id = max(post_ids)
+            end_id = await detect_latest_id(page)
+            if end_id:
                 print(f"Latest post ID auto-detected: {end_id}")
             else:
-                print("Failed to auto-detect latest post, defaulting stop to 245000")
-                end_id = 245000
+                end_id = FALLBACK_LATEST_ID
+                print(f"Failed to auto-detect latest post, defaulting stop to {end_id}")
 
         print(f"Scrape range: {start_id} to {end_id}")
-        
-        # Populate queue
-        queue = asyncio.Queue()
-        count = 0
-        for pid in range(start_id, end_id + 1):
-            status = db.get_post_status(pid)
-            if status in ['completed', 'skipped', 'empty']:
-                continue
-                
-            await queue.put(pid)
-            count += 1
-            if args.limit and count >= args.limit:
-                break
-                
-        print(f"Queue size populated: {count} posts to process")
-        if count == 0:
+
+        pending = pending_ids(start_id, end_id, args.limit)
+        print(f"Queue size populated: {len(pending)} posts to process")
+        if not pending:
             print("No new posts to scrape.")
             await browser.close()
             db.close()
             return
 
-        stats = {"completed": 0, "skipped": 0, "empty": 0, "failed": 0}
-        
-        # Concurrency workers
+        queue = asyncio.Queue()
+        for pid in pending:
+            queue.put_nowait(pid)
+
+        stats = dict(STATS_TEMPLATE)
         concurrency = config["concurrency"]
         delay_ms = config["delay_ms"]
-        
+
         print(f"Starting scraper with {concurrency} workers (delay: {delay_ms}ms)...")
-        tasks = []
-        for _ in range(concurrency):
-            t = asyncio.create_task(worker(queue, scraper, stats, delay_ms, end_id))
-            tasks.append(t)
-            
-        # Wait for queue to be empty
+        tasks = [
+            asyncio.create_task(worker(queue, scraper, stats, delay_ms, end_id))
+            for _ in range(concurrency)
+        ]
+
         try:
             await queue.join()
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, asyncio.CancelledError):
             print("\nShutdown requested by user. Terminating workers...")
         finally:
-            # Cancel workers
             for t in tasks:
                 t.cancel()
-            # Wait for cancellations
             await asyncio.gather(*tasks, return_exceptions=True)
             await browser.close()
             db.close()
-            
+
     print("\nScraper session ended.")
-    print(f"Stats - Completed: {stats['completed']}, Empty/404: {stats['empty']}, Failed: {stats['failed']}, Skipped: {stats['skipped']}")
+    print(f"Stats - Completed: {stats['completed']}, Empty/404: {stats['empty']}, "
+          f"Failed: {stats['failed']}, Skipped: {stats['skipped']}")
+
 
 if __name__ == "__main__":
     try:

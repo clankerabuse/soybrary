@@ -2,9 +2,12 @@
   "concurrency": 3,
   "delay_ms": 2000,
   "data_dir": "./data",
-  "headful_session": true,
   "validate_images": true,
   "sanitize_images": true,
   "validate_videos": true,
-  "sanitize_videos": false
+  "sanitize_videos": false,
+  "pregenerate_thumbnails": true,
+  "thumbnail_size": 300,
+  "host": "127.0.0.1",
+  "port": 8000
 }

@@ -6,7 +6,13 @@ A web scraper and image gallery server for creating and managing your own local 
 
 ## Setup
 
-1. Install dependencies:
+1. Run the setup script (creates a venv, installs dependencies, and downloads Chromium for scraping):
+
+   ```bash
+   ./setup.sh
+   ```
+
+   Or install manually:
 
    ```bash
    pip install -r requirements.txt
@@ -16,10 +22,10 @@ A web scraper and image gallery server for creating and managing your own local 
 2. Start the server:
 
    ```bash
-   python server.py
+   ./start.sh
    ```
 
-   Or use `start.sh` / `start.bat`, which also opens the gallery in your browser.
+   Or run `python server.py` directly. `start.sh` prefers `.venv/bin/python` when the venv exists and opens the gallery in your browser.
 
 Scraping is driven from the gallery's **Scrape** button, or standalone:
 

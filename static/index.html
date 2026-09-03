@@ -104,6 +104,18 @@
         </div>
     </div>
 
+    <div id="backfill-prompt" class="page-jump hidden" role="dialog" aria-modal="true" aria-labelledby="backfill-title">
+        <div class="page-jump-backdrop" id="backfill-backdrop"></div>
+        <div class="page-jump-panel">
+            <h2 id="backfill-title" class="page-jump-title">Backfill missing posts?</h2>
+            <p id="backfill-message" class="backfill-message"></p>
+            <div class="page-jump-actions">
+                <button type="button" class="page-jump-btn page-jump-cancel" id="backfill-no">Not now</button>
+                <button type="button" class="page-jump-btn page-jump-go" id="backfill-yes">Scrape missing</button>
+            </div>
+        </div>
+    </div>
+
     <div id="empty-state" class="empty-state hidden">
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>

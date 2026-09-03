@@ -492,6 +492,31 @@ class TestPendingIds(unittest.TestCase):
         self.db.save_post(42, "completed")
         self.assertEqual(scraper.resume_start_id(), 42)
 
+    def test_count_pending_excludes_done(self):
+        self.db.save_post(2, "completed")
+        self.db.save_post(3, "empty")
+        self.db.save_post(4, "failed")
+        self.assertEqual(scraper.count_pending(1, 5), 3)
+
+    def test_backfill_offer_when_caught_up_with_gaps(self):
+        self.db.save_post(5, "completed")
+        self.db.save_post(6, "completed")
+        offer = scraper.backfill_offer(5, 6)
+        self.assertEqual(offer, {"missing": 4, "end_id": 6})
+
+    def test_backfill_offer_skipped_when_starting_from_one(self):
+        self.db.save_post(3, "completed")
+        self.assertIsNone(scraper.backfill_offer(1, 3))
+
+    def test_backfill_offer_skipped_when_range_still_has_work(self):
+        self.db.save_post(5, "completed")
+        self.assertIsNone(scraper.backfill_offer(5, 7))
+
+    def test_backfill_offer_skipped_when_library_is_complete(self):
+        for pid in range(1, 6):
+            self.db.save_post(pid, "completed")
+        self.assertIsNone(scraper.backfill_offer(4, 5))
+
 
 # ---------------------------------------------------------------------------
 # worker
@@ -694,6 +719,29 @@ class TestScrapeJobEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job.total_queue, 0)
         self.assertTrue(any("No new posts" in e["data"].get("message", "")
                             for e in events if e["type"] == "status"))
+
+    async def test_offers_backfill_when_caught_up_with_gaps(self):
+        # Library only has the high end; resume scrape finds nothing new.
+        for pid in self.ids:
+            self.db.save_post(pid, "completed" if pid != self.ids[-1] else "empty")
+
+        job, events, _ = await self._run(start_id=self.ids[0], end_id=self.ids[-1])
+
+        complete = [e for e in events if e["type"] == "complete"]
+        self.assertEqual(len(complete), 1)
+        backfill = complete[0]["data"].get("backfill")
+        self.assertIsNotNone(backfill)
+        self.assertEqual(backfill["end_id"], self.ids[-1])
+        self.assertEqual(backfill["missing"], self.ids[0] - 1)
+        self.assertEqual(job.backfill_offer, backfill)
+
+    async def test_no_backfill_offer_when_starting_from_one(self):
+        for pid in range(1, self.ids[-1] + 1):
+            self.db.save_post(pid, "completed")
+        job, events, _ = await self._run(start_id=1, end_id=self.ids[-1])
+        complete = [e for e in events if e["type"] == "complete"][-1]
+        self.assertIsNone(complete["data"].get("backfill"))
+        self.assertIsNone(job.backfill_offer)
 
     async def test_limit_caps_the_queue(self):
         job, _, _ = await self._run(start_id=self.ids[0], end_id=self.ids[-1], limit=1)

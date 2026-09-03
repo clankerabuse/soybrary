@@ -456,13 +456,9 @@ function openModal(post) {
         el.addEventListener('click', (e) => {
             e.stopPropagation();
             const tag = el.textContent;
-            const type = el.dataset.type || el.classList.contains('tag-variant') ? 'variant' : el.classList.contains('tag-subvariant') ? 'subvariant' : 'general';
-            let searchVal = tag;
-            if (type === 'variant') searchVal = `variant:${tag}`;
-            else if (type === 'subvariant') searchVal = `subvariant:${tag}`;
-            searchInput.value = searchVal;
+            searchInput.value = tag;
             updateClearButton();
-            currentQuery = searchVal;
+            currentQuery = tag;
             closeModal();
             loadPosts(1);
         });

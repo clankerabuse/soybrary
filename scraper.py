@@ -399,6 +399,14 @@ def pending_ids(start_id, end_id, limit=None):
     return pending
 
 
+def count_pending(start_id, end_id):
+    """How many ids in [start_id, end_id] are not yet completed/skipped/empty."""
+    if end_id is None or start_id is None or end_id < start_id:
+        return 0
+    done = db.get_done_ids(start_id, end_id)
+    return (end_id - start_id + 1) - len(done)
+
+
 def resume_start_id():
     """Default scrape start: just after the highest post already recorded."""
     resume = db.get_resume_id()
@@ -413,6 +421,22 @@ def resume_start_id():
             if f.is_file() and f.stem.isdigit():
                 known.add(int(f.stem))
     return max(known) if known else 1
+
+
+def backfill_offer(start_id, end_id):
+    """If caught up to end_id but gaps remain below start_id, describe a backfill.
+
+    Returns None when there is nothing useful to offer (still work left in the
+    scrape range, already started from 1, or the library has every id).
+    """
+    if start_id is None or end_id is None or start_id <= 1:
+        return None
+    if count_pending(start_id, end_id) > 0:
+        return None
+    missing = count_pending(1, end_id)
+    if missing <= 0:
+        return None
+    return {"missing": missing, "end_id": end_id}
 
 
 async def detect_latest_id(page):
@@ -442,6 +466,7 @@ class ScrapeJob:
         self.current_id = None
         self.total_queue = 0
         self.message = "Initializing..."
+        self.backfill_offer = None
 
     async def _emit(self, event_type, data=None):
         event = {"type": event_type, "data": data or {}}
@@ -509,6 +534,7 @@ class ScrapeJob:
         self.running = True
         self.cancelled = False
         self.stats = dict(STATS_TEMPLATE)
+        self.backfill_offer = None
 
         logger.info("ScrapeJob starting: range %s to %s", self.start_id, self.end_id)
         await self._emit("status", {"message": "Launching browser..."})
@@ -543,8 +569,26 @@ class ScrapeJob:
             await self._emit("error", {"message": str(error_holder[0])})
 
         self.running = False
-        await self._emit("complete", {"stats": dict(self.stats)})
+        payload = {"stats": dict(self.stats)}
+        if self.backfill_offer:
+            payload["backfill"] = self.backfill_offer
+        await self._emit("complete", payload)
         logger.info("Scrape session ended. Stats: %s", self.stats)
+
+    async def _set_backfill_offer(self):
+        if self.cancelled:
+            self.backfill_offer = None
+            return
+        self.backfill_offer = await asyncio.to_thread(
+            backfill_offer, self.start_id, self.end_id)
+        if self.backfill_offer:
+            missing = self.backfill_offer["missing"]
+            await self._emit("status", {
+                "message": (
+                    f"Caught up to post {self.end_id}. "
+                    f"{missing} posts missing from the library — awaiting backfill choice."
+                ),
+            })
 
     async def _run_playwright(self):
         async with async_playwright() as p:
@@ -584,6 +628,7 @@ class ScrapeJob:
 
                 if not pending:
                     await self._emit("status", {"message": "No new posts to scrape."})
+                    await self._set_backfill_offer()
                     return
 
                 tasks = [
@@ -597,6 +642,8 @@ class ScrapeJob:
                     for t in tasks:
                         t.cancel()
                     await asyncio.gather(*tasks, return_exceptions=True)
+
+                await self._set_backfill_offer()
             finally:
                 await browser.close()
 
@@ -638,6 +685,46 @@ async def worker(queue, scraper, stats, delay_ms, end_id=None):
             queue.task_done()
 
 
+def _prompt_backfill(start_id, end_id):
+    """Ask whether to scrape missing library posts from id 1. Returns pending ids or None."""
+    offer = backfill_offer(start_id, end_id)
+    if not offer:
+        return None
+    missing = offer["missing"]
+    try:
+        answer = input(
+            f"Caught up to the latest post. {missing} posts are missing "
+            f"from the library. Scrape from the beginning for those? [y/N] "
+        ).strip().lower()
+    except EOFError:
+        answer = ""
+    if answer not in ("y", "yes"):
+        return None
+    pending = pending_ids(1, end_id)
+    print(f"Backfill queue: {len(pending)} posts to process")
+    return pending
+
+
+async def _run_queue(queue, scraper, stats, delay_ms, end_id):
+    concurrency = config["concurrency"]
+    print(f"Starting scraper with {concurrency} workers (delay: {delay_ms}ms)...")
+    tasks = [
+        asyncio.create_task(worker(queue, scraper, stats, delay_ms, end_id))
+        for _ in range(concurrency)
+    ]
+    interrupted = False
+    try:
+        await queue.join()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        interrupted = True
+        print("\nShutdown requested by user. Terminating workers...")
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return not interrupted
+
+
 async def main():
     import argparse
     parser = argparse.ArgumentParser(description="Soybooru Downloader Scraper (Headless)")
@@ -654,6 +741,7 @@ async def main():
         print(f"Resuming from post ID: {start_id}")
 
     end_id = args.end
+    stats = dict(STATS_TEMPLATE)
 
     print("Launching headless Playwright context...")
     async with async_playwright() as p:
@@ -683,6 +771,11 @@ async def main():
         print(f"Queue size populated: {len(pending)} posts to process")
         if not pending:
             print("No new posts to scrape.")
+            pending = _prompt_backfill(start_id, end_id) or []
+            if pending:
+                start_id = 1
+
+        if not pending:
             await browser.close()
             db.close()
             return
@@ -691,26 +784,18 @@ async def main():
         for pid in pending:
             queue.put_nowait(pid)
 
-        stats = dict(STATS_TEMPLATE)
-        concurrency = config["concurrency"]
         delay_ms = config["delay_ms"]
+        finished = await _run_queue(queue, scraper, stats, delay_ms, end_id)
 
-        print(f"Starting scraper with {concurrency} workers (delay: {delay_ms}ms)...")
-        tasks = [
-            asyncio.create_task(worker(queue, scraper, stats, delay_ms, end_id))
-            for _ in range(concurrency)
-        ]
+        if finished and start_id > 1:
+            backfill = _prompt_backfill(start_id, end_id)
+            if backfill:
+                for pid in backfill:
+                    queue.put_nowait(pid)
+                await _run_queue(queue, scraper, stats, delay_ms, end_id)
 
-        try:
-            await queue.join()
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            print("\nShutdown requested by user. Terminating workers...")
-        finally:
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await browser.close()
-            db.close()
+        await browser.close()
+        db.close()
 
     print("\nScraper session ended.")
     print(f"Stats - Completed: {stats['completed']}, Empty/404: {stats['empty']}, "

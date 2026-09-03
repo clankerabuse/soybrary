@@ -27,6 +27,11 @@ const consoleDot     = scrapeConsole.querySelector('.console-dot');
 const loadingIndicator = document.getElementById('loading-indicator');
 const emptyState     = document.getElementById('empty-state');
 const toastContainer = document.getElementById('toast-container');
+const backfillPrompt = document.getElementById('backfill-prompt');
+const backfillMessage = document.getElementById('backfill-message');
+const backfillYes = document.getElementById('backfill-yes');
+const backfillNo = document.getElementById('backfill-no');
+const backfillBackdrop = document.getElementById('backfill-backdrop');
 
 /* ─── State ───────────────────────────────────────────────────────────────────── */
 let currentPage  = 1;
@@ -698,7 +703,12 @@ pageJumpForm.addEventListener('submit', (e) => {
 pageJumpEl.querySelector('.page-jump-cancel').addEventListener('click', closePageJump);
 pageJumpEl.querySelector('.page-jump-backdrop').addEventListener('click', closePageJump);
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !pageJumpEl.classList.contains('hidden')) closePageJump();
+    if (e.key !== 'Escape') return;
+    if (!backfillPrompt.classList.contains('hidden')) {
+        hideBackfillPrompt();
+        return;
+    }
+    if (!pageJumpEl.classList.contains('hidden')) closePageJump();
 });
 
 /* ─── Console helpers ────────────────────────────────────────────────────────── */
@@ -734,13 +744,23 @@ scrapeBtn.addEventListener('click', async () => {
         return;
     }
 
+    await startScrape();
+});
+
+async function startScrape({ startId = null, endId = null } = {}) {
     scrapeBtn.disabled = true;
     scrapeBtnIconPlay.classList.add('hidden');
     scrapeBtnIconStop.classList.remove('hidden');
     scrapeBtnLabel.textContent = 'Stop';
 
+    const params = new URLSearchParams();
+    if (startId != null) params.set('start_id', String(startId));
+    if (endId != null) params.set('end_id', String(endId));
+    const qs = params.toString();
+    const url = qs ? `/api/scrape/start?${qs}` : '/api/scrape/start';
+
     try {
-        const res = await fetch('/api/scrape/start', { method: 'POST' });
+        const res = await fetch(url, { method: 'POST' });
         console.log('Scrape start response status:', res.status);
         const data = await res.json();
         console.log('Scrape start response data:', data);
@@ -750,6 +770,7 @@ scrapeBtn.addEventListener('click', async () => {
             resetScrapeButton();
         } else {
             addConsoleLine(data.status?.message || 'Scrape started', 'system');
+            setScrapeRunning(true);
         }
     } catch (e) {
         addConsoleLine('Failed to start scrape: ' + e.message, 'error');
@@ -758,7 +779,7 @@ scrapeBtn.addEventListener('click', async () => {
     } finally {
         scrapeBtn.disabled = false;
     }
-});
+}
 
 function resetScrapeButton() {
     isScraping = false;
@@ -768,6 +789,39 @@ function resetScrapeButton() {
     scrapeBtnLabel.textContent = 'Scrape';
     consoleDot.classList.remove('active', 'error');
 }
+
+/* ─── Backfill prompt ────────────────────────────────────────────────────────── */
+let pendingBackfill = null;
+
+function showBackfillPrompt(backfill) {
+    pendingBackfill = backfill;
+    const missing = Number(backfill.missing || 0).toLocaleString();
+    backfillMessage.textContent =
+        `Caught up to the latest post. ${missing} posts are missing from the library. ` +
+        `Scrape from the beginning for those?`;
+    backfillPrompt.classList.remove('hidden');
+    backfillYes.focus();
+}
+
+function hideBackfillPrompt() {
+    backfillPrompt.classList.add('hidden');
+    pendingBackfill = null;
+}
+
+async function acceptBackfill() {
+    const offer = pendingBackfill;
+    hideBackfillPrompt();
+    if (!offer) return;
+    addConsoleLine(
+        `Starting backfill from post #1 (${Number(offer.missing).toLocaleString()} missing)…`,
+        'system'
+    );
+    await startScrape({ startId: 1, endId: offer.end_id });
+}
+
+backfillYes.addEventListener('click', acceptBackfill);
+backfillNo.addEventListener('click', hideBackfillPrompt);
+backfillBackdrop.addEventListener('click', hideBackfillPrompt);
 
 /* ─── Console toggle ─────────────────────────────────────────────────────────── */
 consoleToggle.addEventListener('click', () => {
@@ -836,6 +890,9 @@ function connectSSE() {
                 const msg = `Done — ${s.completed} saved, ${s.skipped} skipped, ${s.empty} empty, ${s.failed} failed`;
                 addConsoleLine(msg, 'success');
                 showToast(msg, 'success', 6000);
+                if (data.data.backfill && data.data.backfill.missing > 0) {
+                    showBackfillPrompt(data.data.backfill);
+                }
                 break;
             }
             case 'error':

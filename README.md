@@ -81,3 +81,7 @@ The catalog is built for a library of a few hundred thousand posts:
 ```bash
 python -m unittest discover
 ```
+
+## Related projects
+
+- **[soy-diffusion](https://github.com/clankerabuse/soy-diffusion)** — SDXL LoRA training pipeline that uses a Soybrary library as its dataset. The trained model is hosted on [Hugging Face](https://huggingface.co/ChineseWhiteGuy/soy_diffusion).

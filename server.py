@@ -204,6 +204,7 @@ async def start_scrape(
     start_id: Optional[int] = Query(default=None),
     end_id: Optional[int] = Query(default=None),
     limit: Optional[int] = Query(default=None),
+    backfill: bool = Query(default=False),
 ):
     global scrape_job, _scrape_task, _event_forwarder
     logger.info("Scrape start request received")
@@ -214,7 +215,7 @@ async def start_scrape(
     if start_id is None:
         start_id = await asyncio.to_thread(_resume_start_id)
 
-    logger.info(f"Scrape range: {start_id} to {end_id}, limit={limit}")
+    logger.info(f"Scrape range: {start_id} to {end_id}, limit={limit}, backfill={backfill}")
 
     try:
         progress_queue = asyncio.Queue()
@@ -224,6 +225,7 @@ async def start_scrape(
             limit=limit,
             progress_queue=progress_queue,
             main_loop=asyncio.get_running_loop(),
+            backfill=backfill,
         )
 
         task = _scrape_task = asyncio.create_task(scrape_job.run())

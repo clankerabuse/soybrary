@@ -747,7 +747,7 @@ scrapeBtn.addEventListener('click', async () => {
     await startScrape();
 });
 
-async function startScrape({ startId = null, endId = null } = {}) {
+async function startScrape({ startId = null, endId = null, backfill = false } = {}) {
     scrapeBtn.disabled = true;
     scrapeBtnIconPlay.classList.add('hidden');
     scrapeBtnIconStop.classList.remove('hidden');
@@ -756,6 +756,7 @@ async function startScrape({ startId = null, endId = null } = {}) {
     const params = new URLSearchParams();
     if (startId != null) params.set('start_id', String(startId));
     if (endId != null) params.set('end_id', String(endId));
+    if (backfill) params.set('backfill', 'true');
     const qs = params.toString();
     const url = qs ? `/api/scrape/start?${qs}` : '/api/scrape/start';
 
@@ -816,7 +817,7 @@ async function acceptBackfill() {
         `Starting backfill from post #1 (${Number(offer.missing).toLocaleString()} missing)…`,
         'system'
     );
-    await startScrape({ startId: 1, endId: offer.end_id });
+    await startScrape({ startId: 1, endId: offer.end_id, backfill: true });
 }
 
 backfillYes.addEventListener('click', acceptBackfill);

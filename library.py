@@ -78,6 +78,8 @@ VIDEOS_DIR = DATA_DIR / "videos"
 METADATA_DIR = DATA_DIR / "metadata"
 THUMBNAILS_DIR = DATA_DIR / "thumbnails"
 DB_PATH = DATA_DIR / "soybooru.db"
+# Post IDs that already failed a missing-entry (backfill) recovery pass.
+BACKFILL_EXHAUSTED = DATA_DIR / ".backfill_exhausted"
 
 
 def ensure_dirs():

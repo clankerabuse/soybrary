@@ -462,10 +462,12 @@ class TestPendingIds(unittest.TestCase):
         self._orig_db = scraper.db
         self.db = library.Database(":memory:")
         scraper.db = self.db
+        library.BACKFILL_EXHAUSTED.unlink(missing_ok=True)
 
     def tearDown(self):
         scraper.db = self._orig_db
         self.db.close()
+        library.BACKFILL_EXHAUSTED.unlink(missing_ok=True)
 
     def test_skips_finished_posts(self):
         self.db.save_post(2, "completed")
@@ -516,6 +518,27 @@ class TestPendingIds(unittest.TestCase):
         for pid in range(1, 6):
             self.db.save_post(pid, "completed")
         self.assertIsNone(scraper.backfill_offer(4, 5))
+
+    def test_pending_ids_skips_exhausted_backfill_posts(self):
+        self.db.save_post(2, "completed")
+        scraper.mark_backfill_exhausted(4)
+        self.assertEqual(scraper.pending_ids(1, 5), [1, 3, 5])
+        self.assertEqual(scraper.count_pending(1, 5), 3)
+
+    def test_backfill_offer_ignores_exhausted_gaps(self):
+        self.db.save_post(5, "completed")
+        self.db.save_post(6, "completed")
+        for pid in range(1, 5):
+            scraper.mark_backfill_exhausted(pid)
+        self.assertIsNone(scraper.backfill_offer(5, 6))
+
+    def test_mark_backfill_exhausted_persists_ids(self):
+        scraper.mark_backfill_exhausted(7)
+        scraper.mark_backfill_exhausted(3)
+        self.assertTrue(library.BACKFILL_EXHAUSTED.is_file())
+        self.assertEqual(scraper.load_exhausted_ids(), {3, 7})
+        self.assertTrue(scraper.is_backfill_exhausted(3))
+        self.assertFalse(scraper.is_backfill_exhausted(4))
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +677,7 @@ class TestScrapeJobEndToEnd(unittest.IsolatedAsyncioTestCase):
         self._orig_config = dict(scraper.config)
         scraper.config.update({"delay_ms": 0, "concurrency": 2,
                                "pregenerate_thumbnails": False})
+        library.BACKFILL_EXHAUSTED.unlink(missing_ok=True)
         self.ids = [7001, 7002, 7003]
         self.posts = {
             pid: {
@@ -673,6 +697,7 @@ class TestScrapeJobEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.db.close()
         scraper.config.clear()
         scraper.config.update(self._orig_config)
+        library.BACKFILL_EXHAUSTED.unlink(missing_ok=True)
         for pid in self.ids:
             (library.IMAGES_DIR / f"{pid}.png").unlink(missing_ok=True)
             (library.METADATA_DIR / f"{pid}.json").unlink(missing_ok=True)
@@ -739,6 +764,51 @@ class TestScrapeJobEndToEnd(unittest.IsolatedAsyncioTestCase):
         for pid in range(1, self.ids[-1] + 1):
             self.db.save_post(pid, "completed")
         job, events, _ = await self._run(start_id=1, end_id=self.ids[-1])
+        complete = [e for e in events if e["type"] == "complete"][-1]
+        self.assertIsNone(complete["data"].get("backfill"))
+        self.assertIsNone(job.backfill_offer)
+
+    async def test_backfill_pass_marks_failures_as_exhausted(self):
+        # Backfill retries a previously-failed id; another failure exhausts it.
+        missing_id = self.ids[0] - 1
+        self.db.save_post(missing_id, "failed")
+        self.db.save_post(self.ids[0], "completed")
+
+        page = FakePage({self.ids[0]: self.posts[self.ids[0]]}, latest_id=self.ids[0])
+        # Force a hard failure (not 404/empty) so recovery can mark exhaustion.
+        original_evaluate = page.evaluate
+
+        async def flaky_evaluate(script, url):
+            post_id = int(url.rstrip("/file").rsplit("/", 1)[-1])
+            if post_id == missing_id:
+                return {"status": 500, "error": "upstream", "data": None}
+            return await original_evaluate(script, url)
+
+        page.evaluate = flaky_evaluate
+        fake, _ = _fake_playwright(page)
+        queue = asyncio.Queue()
+        job = scraper.ScrapeJob(
+            start_id=missing_id,
+            end_id=self.ids[0],
+            progress_queue=queue,
+            main_loop=asyncio.get_running_loop(),
+            backfill=True,
+        )
+        with patch.object(scraper, "async_playwright", fake), \
+             patch.object(scraper, "ACTIVATION_WAIT_SECONDS", 0):
+            await asyncio.wait_for(job.run(), timeout=30)
+
+        self.assertEqual(self.db.get_post_status(missing_id), "failed")
+        self.assertTrue(scraper.is_backfill_exhausted(missing_id))
+        self.assertNotIn(missing_id, scraper.pending_ids(missing_id, self.ids[0]))
+
+    async def test_exhausted_ids_suppress_backfill_offer(self):
+        library.BACKFILL_EXHAUSTED.write_text(
+            json.dumps(list(range(1, self.ids[0]))) + "\n", encoding="utf-8")
+        for pid in self.ids:
+            self.db.save_post(pid, "completed" if pid != self.ids[-1] else "empty")
+
+        job, events, _ = await self._run(start_id=self.ids[0], end_id=self.ids[-1])
         complete = [e for e in events if e["type"] == "complete"][-1]
         self.assertIsNone(complete["data"].get("backfill"))
         self.assertIsNone(job.backfill_offer)

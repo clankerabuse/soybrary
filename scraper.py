@@ -18,6 +18,8 @@ from PIL import Image
 from playwright.async_api import async_playwright
 
 from library import (
+    BACKFILL_EXHAUSTED,
+    DATA_DIR,
     DB_PATH,
     IMAGES_DIR,
     METADATA_DIR,
@@ -256,6 +258,8 @@ async def scrape_post(scraper, post_id):
     status = db.get_post_status(post_id)
     if status in ['completed', 'skipped', 'empty']:
         return "skipped"
+    if is_backfill_exhausted(post_id):
+        return "skipped"
 
     meta_url = f"{BOORU_ORIGIN}/api/booru/posts/{post_id}"
     file_url = f"{BOORU_ORIGIN}/api/booru/posts/{post_id}/file"
@@ -386,12 +390,14 @@ def pending_ids(start_id, end_id, limit=None):
     """Ids in the range that still need scraping.
 
     One range query beats asking the database about every id in turn: a full
-    catalog sweep is hundreds of thousands of ids.
+    catalog sweep is hundreds of thousands of ids. IDs that already failed a
+    backfill recovery pass are omitted so later scans do not re-hit the booru.
     """
     done = db.get_done_ids(start_id, end_id)
+    exhausted = load_exhausted_ids()
     pending = []
     for pid in range(start_id, end_id + 1):
-        if pid in done:
+        if pid in done or pid in exhausted:
             continue
         pending.append(pid)
         if limit and len(pending) >= limit:
@@ -400,11 +406,12 @@ def pending_ids(start_id, end_id, limit=None):
 
 
 def count_pending(start_id, end_id):
-    """How many ids in [start_id, end_id] are not yet completed/skipped/empty."""
+    """How many ids in [start_id, end_id] are not yet completed/skipped/empty/exhausted."""
     if end_id is None or start_id is None or end_id < start_id:
         return 0
     done = db.get_done_ids(start_id, end_id)
-    return (end_id - start_id + 1) - len(done)
+    exhausted = {pid for pid in load_exhausted_ids() if start_id <= pid <= end_id}
+    return (end_id - start_id + 1) - len(done | exhausted)
 
 
 def resume_start_id():
@@ -423,11 +430,55 @@ def resume_start_id():
     return max(known) if known else 1
 
 
+_exhausted_lock = threading.Lock()
+
+
+def load_exhausted_ids():
+    """Post IDs that already failed a missing-entry recovery (backfill) pass."""
+    if not BACKFILL_EXHAUSTED.is_file():
+        return set()
+    try:
+        data = json.loads(BACKFILL_EXHAUSTED.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Could not read backfill exhausted list %s: %s", BACKFILL_EXHAUSTED, e)
+        return set()
+    if isinstance(data, dict):
+        data = data.get("ids", [])
+    if not isinstance(data, list):
+        return set()
+    try:
+        return {int(x) for x in data}
+    except (TypeError, ValueError):
+        return set()
+
+
+def is_backfill_exhausted(post_id):
+    return int(post_id) in load_exhausted_ids()
+
+
+def mark_backfill_exhausted(post_id):
+    """Record that a backfill attempt could not recover this post — skip on later scans."""
+    pid = int(post_id)
+    with _exhausted_lock:
+        ids = load_exhausted_ids()
+        if pid in ids:
+            return
+        ids.add(pid)
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            BACKFILL_EXHAUSTED.write_text(
+                json.dumps(sorted(ids)) + "\n", encoding="utf-8")
+        except OSError as e:
+            logger.warning("Could not write backfill exhausted list %s: %s",
+                           BACKFILL_EXHAUSTED, e)
+
+
 def backfill_offer(start_id, end_id):
     """If caught up to end_id but gaps remain below start_id, describe a backfill.
 
     Returns None when there is nothing useful to offer (still work left in the
-    scrape range, already started from 1, or the library has every id).
+    scrape range, already started from 1, or every remaining gap was already
+    tried and exhausted on a prior backfill pass).
     """
     if start_id is None or end_id is None or start_id <= 1:
         return None
@@ -454,12 +505,14 @@ def scrape_delay(delay_ms):
 class ScrapeJob:
     """Manages a scrape session with progress tracking and real-time updates."""
 
-    def __init__(self, start_id=None, end_id=None, limit=None, progress_queue=None, main_loop=None):
+    def __init__(self, start_id=None, end_id=None, limit=None, progress_queue=None,
+                 main_loop=None, backfill=False):
         self.start_id = start_id
         self.end_id = end_id
         self.limit = limit
         self.progress_queue = progress_queue or asyncio.Queue()
         self.main_loop = main_loop or asyncio.get_event_loop()
+        self.backfill = backfill
         self.running = False
         self.cancelled = False
         self.stats = dict(STATS_TEMPLATE)
@@ -510,6 +563,8 @@ class ScrapeJob:
                 self.current_id = post_id
                 await self._emit("post_start", {"id": post_id})
                 res = await scrape_post(scraper, post_id)
+                if self.backfill and res == "failed":
+                    await asyncio.to_thread(mark_backfill_exhausted, post_id)
                 self.stats[res] = self.stats.get(res, 0) + 1
                 total_done = sum(self.stats.values())
 
@@ -536,7 +591,8 @@ class ScrapeJob:
         self.stats = dict(STATS_TEMPLATE)
         self.backfill_offer = None
 
-        logger.info("ScrapeJob starting: range %s to %s", self.start_id, self.end_id)
+        logger.info("ScrapeJob starting: range %s to %s (backfill=%s)",
+                    self.start_id, self.end_id, self.backfill)
         await self._emit("status", {"message": "Launching browser..."})
 
         # Playwright drives subprocesses, which needs a loop that supports them
@@ -664,11 +720,13 @@ class ScrapeJob:
 
 
 # CLI entry point
-async def worker(queue, scraper, stats, delay_ms, end_id=None):
+async def worker(queue, scraper, stats, delay_ms, end_id=None, backfill=False):
     while True:
         post_id = await queue.get()
         try:
             res = await scrape_post(scraper, post_id)
+            if backfill and res == "failed":
+                await asyncio.to_thread(mark_backfill_exhausted, post_id)
             stats[res] = stats.get(res, 0) + 1
             total_done = sum(stats.values())
 
@@ -705,11 +763,11 @@ def _prompt_backfill(start_id, end_id):
     return pending
 
 
-async def _run_queue(queue, scraper, stats, delay_ms, end_id):
+async def _run_queue(queue, scraper, stats, delay_ms, end_id, backfill=False):
     concurrency = config["concurrency"]
     print(f"Starting scraper with {concurrency} workers (delay: {delay_ms}ms)...")
     tasks = [
-        asyncio.create_task(worker(queue, scraper, stats, delay_ms, end_id))
+        asyncio.create_task(worker(queue, scraper, stats, delay_ms, end_id, backfill=backfill))
         for _ in range(concurrency)
     ]
     interrupted = False
@@ -769,11 +827,13 @@ async def main():
 
         pending = pending_ids(start_id, end_id, args.limit)
         print(f"Queue size populated: {len(pending)} posts to process")
+        is_backfill = False
         if not pending:
             print("No new posts to scrape.")
             pending = _prompt_backfill(start_id, end_id) or []
             if pending:
                 start_id = 1
+                is_backfill = True
 
         if not pending:
             await browser.close()
@@ -785,14 +845,16 @@ async def main():
             queue.put_nowait(pid)
 
         delay_ms = config["delay_ms"]
-        finished = await _run_queue(queue, scraper, stats, delay_ms, end_id)
+        finished = await _run_queue(
+            queue, scraper, stats, delay_ms, end_id, backfill=is_backfill)
 
         if finished and start_id > 1:
             backfill = _prompt_backfill(start_id, end_id)
             if backfill:
                 for pid in backfill:
                     queue.put_nowait(pid)
-                await _run_queue(queue, scraper, stats, delay_ms, end_id)
+                await _run_queue(
+                    queue, scraper, stats, delay_ms, end_id, backfill=True)
 
         await browser.close()
         db.close()

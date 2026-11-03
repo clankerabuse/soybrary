@@ -114,6 +114,17 @@ class TestCatalog(ServerTestCase):
         self.assertEqual([p["id"] for p in data["posts"]], [9003, 9004])
 
 
+class TestSearchInputs(ServerTestCase):
+    """Odd but representable search input must not blank the gallery."""
+
+    def test_oversized_numeric_query_returns_a_catalog(self):
+        client = TestClient(server.app, raise_server_exceptions=False)
+        for q in ("9" * 40, str(2 ** 63), "²"):
+            r = client.get("/api/posts", params={"q": q})
+            self.assertEqual(r.status_code, 200, q)
+            self.assertEqual(r.json()["posts"], [], q)
+
+
 class TestTagSuggestions(ServerTestCase):
     def test_prefix_suggestions(self):
         tags = self.client.get("/api/tags", params={"prefix": "gap"}).json()["tags"]

@@ -17,6 +17,9 @@ POST_FIELDS = ("id", "width", "height", "extension", "mime_type", "tags", "varia
                "subvariant", "uploader", "date_uploaded")
 _HAS_ALNUM = re.compile(r"[0-9A-Za-z]")
 
+# Post ids are SQLite INTEGERs, so anything outside this range cannot be one.
+MAX_POST_ID = 2 ** 63 - 1
+
 # The full-text index is joined with CROSS JOIN on purpose: it pins the index as
 # the outer loop. Left to its own devices SQLite sometimes scans posts instead
 # and re-runs the match for every row, which turns a 2ms query into a 20s one.
@@ -38,6 +41,22 @@ def _fts_supported(conn: sqlite3.Connection) -> bool:
         return False
 
 
+def _is_post_id(term: str) -> bool:
+    """True when the digit run actually fits in a post id column.
+
+    str.isdigit() is true for characters int() rejects (superscripts) and says
+    nothing about magnitude, so a huge or odd digit run has to be searched as
+    text: binding it as an id raises out of sqlite3 and 500s the catalog.
+    """
+    if not term.isdigit():
+        return False
+    try:
+        value = int(term)
+    except ValueError:
+        return False
+    return 0 <= value <= MAX_POST_ID
+
+
 def parse_terms(q: str) -> list[tuple[str, str]]:
     """Split a query into (kind, value) pairs: variant, subvariant, id or general."""
     terms = []
@@ -46,7 +65,7 @@ def parse_terms(q: str) -> list[tuple[str, str]]:
             terms.append(("variant", term[8:]))
         elif term.startswith("subvariant:") and len(term) > 11:
             terms.append(("subvariant", term[11:]))
-        elif term.isdigit():
+        elif _is_post_id(term):
             terms.append(("id", term))
         else:
             terms.append(("general", term))

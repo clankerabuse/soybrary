@@ -56,6 +56,21 @@ class TestParseTerms(unittest.TestCase):
     def test_empty_query(self):
         self.assertEqual(search.parse_terms("   "), [])
 
+    def test_digits_beyond_the_id_range_are_text(self):
+        # SQLite ids are signed 64-bit; a longer digit run can only be tag text,
+        # and casting it to an id raises OverflowError out of sqlite3.
+        for term in ("9" * 40, str(2 ** 63)):
+            self.assertEqual(search.parse_terms(term), [("general", term)], term)
+
+    def test_largest_representable_id_is_still_an_id(self):
+        term = str(2 ** 63 - 1)
+        self.assertEqual(search.parse_terms(term), [("id", term)])
+
+    def test_digits_int_cannot_parse_are_text(self):
+        # str.isdigit() accepts characters int() rejects, such as superscripts.
+        for term in ("²", "³"):
+            self.assertEqual(search.parse_terms(term), [("general", term)], term)
+
 
 class TestQueryResults(SearchTestCase):
     def test_empty_query_returns_completed_posts(self):
@@ -140,6 +155,18 @@ class TestQueryPlanning(SearchTestCase):
     def test_untokenisable_query_falls_back_to_scan(self):
         self.assertFalse(search.build_query("!!!", self.conn).used_fts)
         self.assertEqual(self.ids("!!!"), set())
+
+    def test_oversized_numeric_terms_do_not_raise(self):
+        q = "9" * 40
+        for plan in (search.build_query(q, self.conn), search.build_like_query(q)):
+            self.assertEqual(self.conn.execute(plan.count_sql, plan.params).fetchone()[0], 0)
+            self.assertEqual(self.conn.execute(plan.select_sql, plan.params).fetchall(), [])
+
+    def test_oversized_numeric_term_still_matches_tag_text(self):
+        long_number = "9" * 40
+        self.db.save_post(6, "completed", tags=f"{long_number} digits")
+        self.assertEqual(self.ids(long_number, use_like=True), {6})
+        self.assertIn(6, self.ids(long_number))
 
     def test_quotes_do_not_break_the_query(self):
         for q in ('quote"inside', '""', 'a"b"c', "NEAR(", "*", "^", "tag*"):

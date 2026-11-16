@@ -1,93 +1,46 @@
 # Soybrary
 
-A web scraper and image gallery server for creating and managing your own local Soyjak library.
+Web scraper and gallery server for building your own local Soyjak library.
 
 ![Preview](preview%20soybrary.png)
 
 ## Setup
 
-1. Run the setup script (creates a venv, installs dependencies, and downloads Chromium for scraping):
+```bash
+./setup.sh     # venv, dependencies, Playwright Chromium
+./start.sh     # serves http://127.0.0.1:8000
+```
 
-   ```bash
-   ./setup.sh
-   ```
-
-   Or install manually:
-
-   ```bash
-   pip install -r requirements.txt
-   playwright install chromium
-   ```
-
-2. Start the server:
-
-   ```bash
-   ./start.sh
-   ```
-
-   Or run `python server.py` directly. `start.sh` prefers `.venv/bin/python` when the venv exists and opens the gallery in your browser.
-
-Scraping is driven from the gallery's **Scrape** button, or standalone:
+Scrape from the gallery's **Scrape** button, or standalone:
 
 ```bash
 python scraper.py --start 1000 --limit 500
 ```
 
-Both entry points share one library, so a run started in the UI resumes where
-the CLI left off and vice versa.
-
-`ffmpeg` and `ffprobe` are optional. Without them, videos are validated by
+Both share one library, so a run started in the UI resumes where the CLI left
+off. `ffmpeg`/`ffprobe` are optional — without them videos are validated by
 signature only and get no thumbnails.
 
-## Configuration
+Settings live in `config.json`: `concurrency`, `delay_ms`, `data_dir`,
+`validate_images`/`validate_videos`, `sanitize_images`/`sanitize_videos`,
+`pregenerate_thumbnails`, `thumbnail_size`, `host`/`port`. The scrape endpoints
+are unauthenticated, so only widen `host` on a network you trust.
 
-`config.json` is read by both the scraper and the server:
+## Library
 
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `concurrency` | `3` | Posts fetched in parallel |
-| `delay_ms` | `2000` | Politeness delay per post, jittered ±30% |
-| `data_dir` | `./data` | Library location, relative to the project |
-| `validate_images` / `validate_videos` | `true` | Check signatures and structure before storing |
-| `sanitize_images` | `true` | Strip metadata by re-encoding stills; animations are left intact |
-| `sanitize_videos` | `false` | Remux through ffmpeg to drop container metadata |
-| `pregenerate_thumbnails` | `true` | Build thumbnails during the scrape instead of on first view |
-| `thumbnail_size` | `300` | Longest thumbnail edge, in pixels |
-| `host` / `port` | `127.0.0.1:8000` | Where the server listens. The scrape endpoints are unauthenticated, so only widen this on a network you trust |
+`data/` holds `images/`, `videos/`, `thumbnails/`, `metadata/` and
+`soybooru.db` (catalog, FTS5 search index, scrape state). Deleting the database
+loses scrape progress; `thumbnails/` regenerates on demand.
 
-## Library layout
+Built for a few hundred thousand posts: index-only listing, FTS5 search, WAL so
+browsing stays responsive during a scrape, media resolved by post id with
+immutable cache headers, and animations fetched only as they approach the
+viewport.
 
-```
-data/
-├── images/      one file per still, named <post id>.<ext>
-├── videos/      one file per video
-├── thumbnails/  300px JPEG previews
-├── metadata/    per-post JSON
-└── soybooru.db  catalog, search index and scrape state
-```
+Tests: `python -m unittest discover`
 
-Deleting `soybooru.db` loses scrape progress; deleting `thumbnails/` is safe,
-as they are regenerated on demand.
+## Related
 
-## How it scales
-
-The catalog is built for a library of a few hundred thousand posts:
-
-- Listing and counting are index-only lookups, and search runs against an FTS5
-  index instead of scanning every row. Result totals are cached until the
-  library changes.
-- The database runs in WAL mode, so browsing stays responsive during a scrape.
-- Media files resolve directly from a post id and extension rather than
-  scanning a directory that holds one file per post, and they are served with
-  an immutable cache header.
-- The gallery fetches full-size animations only as they approach the viewport.
-
-## Tests
-
-```bash
-python -m unittest discover
-```
-
-## Related projects
-
-- **[soy-diffusion](https://github.com/clankerabuse/soy-diffusion)** — SDXL LoRA training pipeline that uses a Soybrary library as its dataset. The trained model is hosted on [Hugging Face](https://huggingface.co/ChineseWhiteGuy/soy_diffusion).
+[soy-diffusion](https://github.com/clankerabuse/soy-diffusion) trains an SDXL
+LoRA on a Soybrary library; the model is on
+[Hugging Face](https://huggingface.co/ChineseWhiteGuy/soy_diffusion).

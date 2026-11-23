@@ -247,6 +247,14 @@ class TestThumbnails(unittest.TestCase):
         library.ensure_thumbnail(self.post_id, "png", "image/png")
         self.assertEqual(self.thumb.stat().st_mtime_ns, mtime)
 
+    def test_thumbnail_path_rejects_path_escape(self):
+        self.assertEqual(library.thumbnail_path("6002"),  # type: ignore[arg-type]
+                         library.THUMBNAILS_DIR / "6002.jpg")
+        for bad in ("../../etc/passwd", "6001/../../x", "abc", -1, None):
+            with self.subTest(post_id=bad):
+                with self.assertRaises(ValueError):
+                    library.thumbnail_path(bad)  # type: ignore[arg-type]
+
     def test_thumbnail_from_bytes(self):
         data = self.image.read_bytes()
         self.assertEqual(library.thumbnail_from_bytes(self.post_id, data), self.thumb)

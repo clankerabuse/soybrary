@@ -419,7 +419,24 @@ _unthumbnailable_lock = threading.Lock()
 
 
 def thumbnail_path(post_id: int) -> Path:
-    return THUMBNAILS_DIR / f"{post_id}.jpg"
+    """Thumbnail file for a post id.
+
+    The id is coerced to a non-negative int and the result is checked to stay inside
+    THUMBNAILS_DIR, so a caller passing an id straight from a request or a database row can
+    never turn it into a path escape.
+    """
+    try:
+        pid = int(post_id)
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid post id: {post_id!r}") from None
+    if pid < 0:
+        raise ValueError(f"invalid post id: {post_id!r}")
+    dest = THUMBNAILS_DIR / f"{pid}.jpg"
+    try:
+        dest.resolve().relative_to(Path(THUMBNAILS_DIR).resolve())
+    except ValueError:
+        raise ValueError(f"invalid post id: {post_id!r}") from None
+    return dest
 
 
 def _mark_unthumbnailable(post_id: int):

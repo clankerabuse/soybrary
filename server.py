@@ -244,15 +244,16 @@ async def start_scrape(
                 try:
                     task.result()
                 except Exception as e:
+                    # log the detail; never hand internal exception text to the caller
                     logger.error(f"Scrape task failed immediately: {e}")
-                    return {"error": f"Scrape failed to start: {str(e)}"}
+                    return {"error": "Scrape failed to start."}
                 return {"error": "Scrape job finished unexpectedly."}
 
         logger.error("Scrape job failed to start within 3s")
         return {"error": "Scrape job failed to start."}
-    except Exception as e:
+    except Exception:
         logger.exception("Exception in start_scrape endpoint:")
-        return {"error": f"Failed to start scrape: {str(e)}"}
+        return {"error": "Failed to start scrape."}
 
 
 def _resume_start_id() -> int:
